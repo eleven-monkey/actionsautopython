@@ -32,6 +32,9 @@ on:
 jobs:
   translate:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .  # 确保在仓库根目录执行命令
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -49,6 +52,14 @@ jobs:
       - name: 创建字幕目录
         run: mkdir -p subtitles
         
+      - name: 验证文件存在
+        run: |
+          echo "当前工作目录: $(pwd)"
+          echo "目录内容:"
+          ls -la
+          echo "检查Python文件:"
+          ls -la *.py || echo "未找到Python文件"
+          
       - name: 创建API配置文件
         run: |
           cat > api_config.json << EOF
@@ -64,8 +75,6 @@ jobs:
           python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
           
       - name: 翻译字幕
-        env:
-          API_CONFIG_FILE: api_config.json
         run: |
           python translate_subtitles.py \
             --api_config_file api_config.json \
