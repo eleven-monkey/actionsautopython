@@ -28,13 +28,18 @@ on:
         required: true
         default: 'false'
         type: boolean
+      use_cookies:
+        description: '使用cookies (需要先设置YOUTUBE_COOKIES secret)'
+        required: true
+        default: 'true'
+        type: boolean
 
 jobs:
   translate:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: .  # 确保在仓库根目录执行命令
+        working-directory: .
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -52,13 +57,11 @@ jobs:
       - name: 创建字幕目录
         run: mkdir -p subtitles
         
-      - name: 验证文件存在
+      - name: 创建cookies文件（如果启用）
+        if: github.event.inputs.use_cookies == 'true'
         run: |
-          echo "当前工作目录: $(pwd)"
-          echo "目录内容:"
-          ls -la
-          echo "检查Python文件:"
-          ls -la *.py || echo "未找到Python文件"
+          echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
+          echo "cookies文件已创建"
           
       - name: 创建API配置文件
         run: |
@@ -72,7 +75,11 @@ jobs:
           
       - name: 下载YouTube字幕
         run: |
-          python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
+          if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
+            python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}" --cookies youtube_cookies.txt
+          else
+            python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
+          fi
           
       - name: 翻译字幕
         run: |

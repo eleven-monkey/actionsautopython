@@ -5,21 +5,34 @@ import glob
 import re
 from yt_dlp import YoutubeDL
 
-def download_subtitles(url):
+def download_subtitles(url, cookies_file=None):
     """下载YouTube视频的字幕"""
     # 设置下载选项
     ydl_opts = {
         'writeautomaticsub': True,       # 下载自动生成的字幕
         'skip_download': True,           # 跳过视频下载
         'subtitleslangs': ['en'],       # 下载英文字幕
-        'cookies':'cookies.txt',        #使用cookies
         'quiet': True,                   # 减少控制台输出
-        'outtmpl': 'subtitles/%(title)s.%(ext)s'  # 字幕输出路径模板
+        'outtmpl': 'subtitles/%(title)s.%(ext)s',  # 字幕输出路径模板
+        # 添加模拟真实浏览器的选项
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'no_check_certificate': True,    # 跳过证书验证
     }
+    
+    # 如果提供了cookies文件，添加到选项中
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts['cookiefile'] = cookies_file
+        print(f"使用cookies文件: {cookies_file}")
+    else:
+        print("未提供cookies文件或文件不存在，尝试无cookies下载")
 
     # 使用 yt-dlp 下载字幕
-    with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        print(f"下载失败: {e}")
+        return None
     
     # 重命名vtt文件
     vtt_files = glob.glob('subtitles/*.vtt')
@@ -103,10 +116,11 @@ def process_vtt_file(vtt_file):
 def main():
     parser = argparse.ArgumentParser(description='下载YouTube视频字幕')
     parser.add_argument('--url', required=True, help='YouTube视频URL')
+    parser.add_argument('--cookies', help='YouTube cookies文件路径（可选）')
     args = parser.parse_args()
     
     print(f"开始下载YouTube字幕: {args.url}")
-    result = download_subtitles(args.url)
+    result = download_subtitles(args.url, args.cookies)
     
     if result:
         print(f"字幕下载并处理成功: {result}")
