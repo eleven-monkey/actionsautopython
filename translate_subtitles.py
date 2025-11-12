@@ -232,8 +232,10 @@ def translate_text(text, api_config, max_retries=5):
     return None
 
 def filter_think_tags(text):
-    """过滤掉文本中的
-    使用re.DOTALL标志使.匹配包括换行符在内的任何字符"""
+    """过滤掉文本中的<think></think>标签及其中的内容"""
+    # 使用正则表达式匹配<think>标签及其内容
+    pattern = r'<think>.*?</think>'
+    # Use re.DOTALL flag to make . match any character including newline
     filtered_text = re.sub(pattern, '', text, flags=re.DOTALL)
     return filtered_text
 
@@ -248,13 +250,13 @@ def save_translation(translated_segments, output_path, keep_timestamps=False):
     """将翻译结果保存到文件"""
     with open(output_path, 'w', encoding='utf-8') as file:
         for segment in translated_segments:
-            # 过滤掉<details type="reasoning" done="false" view="" last_tool_call_name=""><summary>Thinking…</summary>标签及其内容
-             filtered_segment = filter_think_tags(segment)
-             # 如果不保留时间戳，则仅移除时间戳
-             if not keep_timestamps:
-                 filtered_segment = remove_timestamps(filtered_segment)
-             file.write(filtered_segment + "\n\n")
- 
+            # 过滤掉思考标签
+            filtered_segment = filter_think_tags(segment)
+            # 如果不保留时间戳，则移除时间戳
+            if not keep_timestamps:
+                filtered_segment = remove_timestamps(filtered_segment)
+            file.write(filtered_segment + "\n\n")
+
 def main():
     parser = argparse.ArgumentParser(description='翻译字幕文件')
     parser.add_argument('--api_config_file', required=True, help='API配置文件路径')

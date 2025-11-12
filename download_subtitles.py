@@ -5,6 +5,131 @@ import glob
 import re
 from yt_dlp import YoutubeDL
 
+# ========== 可调参数 ==========
+DEBUG = True          # 打开详细调试输出
+SENTENCE_END = ".!?"    # 只以句号结尾分句（按需求）。如需 ?! 一起分句，可改为 ".!?"
+# =============================
+
+# 正则：cue 头（起止时间）
+CUE_HEADER_RE = re.compile(
+    r'^(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})'
+)
+
+# 正则：逐词时间戳 <HH:MM:SS.mmm>
+TS_TAG_RE = re.compile(r'<(\d{2}:\d{2}:\d{2}\.\d{3})>')
+
+# 正则：清理 <c> 或 <c.xxx> 样式标签
+C_TAG_RE = re.compile(r'</?c(?:\.[^>]*)?>', re.IGNORECASE)
+
+
+def vtt_to_sentences(vtt_text: str, debug: bool = False) -> str:
+    """
+    将带逐词时间戳的 YouTube WebVTT 字幕转换为按句（以句号、问号、叹号结尾）文本，句首带起始时间。
+    解析策略：
+      1) 识别 cue 头，保存该 cue 的起始时间（作为该块默认时间）。
+      2) 仅处理包含 <HH:MM:SS.mmm> 的行，避免重复的纯文本行。
+      3) 行内将 <timestamp> 替换为哨兵 [[TS:...]] 并移除 <c> 标签；
+         扫描 token，遇到 [[TS:...]] 更新"有效时间"；普通词使用当前有效时间。
+      4) 累词到遇到以 '.' '!' 或 '?' 结尾的词即成句，句时间=本句第一词的时间。
+    """
+    lines = vtt_text.splitlines()
+    num_lines = len(lines)
+    num_cues = 0
+    num_lines_with_ts = 0
+    num_ts_tags = 0
+    num_words = 0
+
+    sentences = []
+    current_words = []
+    current_sentence_start_time = None
+
+    effective_time = None        # 当前有效词时间
+    cue_start_time = None        # 当前 cue 起始时间（备用）
+
+    def flush_sentence():
+        nonlocal current_words, current_sentence_start_time
+        if not current_words:
+            return
+        # 组合文本并清理标点前空格
+        text = " ".join(current_words)
+        text = re.sub(r"\s+([,.;!?])", r"\1", text)   # 去掉标点前多余空格
+        text = re.sub(r"\(\s+", "(", text)            # 括号内多余空格
+        text = re.sub(r"\s+\)", ")", text)
+        start_ts = current_sentence_start_time or cue_start_time or effective_time or "00:00:00.000"
+        sentences.append(f"({start_ts}) {text}")
+        current_words = []
+        current_sentence_start_time = None
+
+    for i, raw_line in enumerate(lines):
+        line = raw_line.strip("\ufeff\r\n")
+
+        # cue 头
+        m = CUE_HEADER_RE.match(line)
+        if m:
+            num_cues += 1
+            cue_start_time = m.group(1)
+            effective_time = cue_start_time  # 初始有效时间设为 cue 起始
+            if debug:
+                print(f"[cue] line {i+1}: start={cue_start_time}, end={m.group(2)}")
+            continue
+
+        # 只处理含逐词时间戳的行
+        if not TS_TAG_RE.search(line):
+            continue
+
+        num_lines_with_ts += 1
+
+        # 清理 <c> 标签，并把 <timestamp> 变成 [[TS:...]] 哨兵
+        s = C_TAG_RE.sub("", line)
+        # 统计本行的 timestamp 个数
+        ts_in_line = TS_TAG_RE.findall(s)
+        num_ts_tags += len(ts_in_line)
+        s = TS_TAG_RE.sub(lambda mm: f" [[TS:{mm.group(1)}]] ", s)
+
+        # 发送给模型时保留所有内容，包括非文本标签和时间戳
+        # 但在处理逐词时间戳时，只关心时间和词本身
+        # 扫描 token
+        for token in s.split():
+            if token.startswith("[[TS:") and token.endswith("]]"):
+                effective_time = token[5:-2]  # 取出 HH:MM:SS.mmm
+                continue
+
+            word = token.strip()
+            if not word:
+                continue
+
+            # 记录首词时间
+            if current_sentence_start_time is None:
+                current_sentence_start_time = effective_time or cue_start_time
+
+            current_words.append(word)
+            num_words += 1
+
+            # 句子结束判定（句号、问号、叹号）
+            if SENTENCE_END and word.strip().endswith(tuple(SENTENCE_END)):
+                flush_sentence()
+
+    # 文件结束，收尾
+    flush_sentence()
+
+    if debug:
+        print("========== DEBUG SUMMARY ==========")
+        print(f"Total lines           : {num_lines}")
+        print(f"Cue headers found     : {num_cues}")
+        print(f"Lines with <timestamp>: {num_lines_with_ts}")
+        print(f"Timestamp tags found  : {num_ts_tags}")
+        print(f"Words collected       : {num_words}")
+        print(f"Sentences assembled   : {len(sentences)}")
+        if num_ts_tags == 0:
+            print("\n[Hint] 没发现逐词 <timestamp> 标签：")
+            print("  - 该 VTT 可能不是逐词时间戳版本（只有普通句级字幕）；")
+            print("  - 或时间戳格式与 <HH:MM:SS.mmm> 不一致；")
+            print("  - 可把 DEBUG=True 并打印前几百字符手动检查。")
+        print("===================================\n")
+
+    return "\n".join(sentences)
+
+
 def download_subtitles(url, cookies_file=None):
     """下载YouTube视频的字幕"""
     # 设置下载选项
@@ -61,54 +186,14 @@ def process_vtt_file(vtt_file):
     output_file = os.path.splitext(vtt_file)[0] + "_processed.txt"
     
     with open(vtt_file, 'r', encoding='utf-8') as f:
-        content = f.read()
+        vtt_content = f.read()
     
-    # 移除VTT文件头和样式信息
-    content = re.sub(r'WEBVTT.*?\n\n', '', content, flags=re.DOTALL)
-    content = re.sub(r'NOTE.*?\n\n', '', content, flags=re.DOTALL)
-    content = re.sub(r'STYLE.*?\n\n', '', content, flags=re.DOTALL)
-    
-    # 分割字幕块
-    blocks = re.split(r'\n\n+', content.strip())
-    
-    processed_lines = []
-    
-    for block in blocks:
-        if not block.strip():
-            continue
-            
-        # 提取时间戳和文本
-        lines = block.split('\n')
-        timestamp_line = None
-        text_lines = []
-        
-        for line in lines:
-            if '-->' in line:
-                timestamp_line = line
-            elif line.strip():
-                text_lines.append(line.strip())
-        
-        if timestamp_line and text_lines:
-            # 解析时间戳
-            time_match = re.search(r'(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})', timestamp_line)
-            if time_match:
-                start_time = time_match.group(1)
-                # 格式化时间戳为 (HH:MM:SS.mmm)
-                formatted_time = f"({start_time})"
-                
-                # 合并文本行
-                text = ' '.join(text_lines)
-                
-                # 移除HTML标签（如果有）
-                text = re.sub(r'<[^>]+>', '', text)
-                
-                # 添加到处理后的行列表
-                processed_lines.append(f"{formatted_time} {text}")
+    # 使用新的vtt_to_sentences函数处理VTT内容
+    processed_content = vtt_to_sentences(vtt_content, debug=DEBUG)
     
     # 写入处理后的文件
     with open(output_file, 'w', encoding='utf-8') as f:
-        for line in processed_lines:
-            f.write(line + '\n')
+        f.write(processed_content)
     
     print(f"处理后的字幕已保存到: {output_file}")
     return output_file
