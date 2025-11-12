@@ -256,26 +256,24 @@ def save_translation(translated_segments, output_path, keep_timestamps=False):
              file.write(filtered_segment + "\n\n")
  
 def main():
-    parser = argparse.ArgumentParser(description='翻译YouTube字幕')
+    parser = argparse.ArgumentParser(description='翻译字幕文件')
     parser.add_argument('--api_config_file', required=True, help='API配置文件路径')
-    parser.add_argument('--segment_size', type=int, default=3, help='段落分组大小')
+    parser.add_argument('--segment_size', type=int, default=3, help='分段大小')
     parser.add_argument('--keep_timestamps', action='store_true', help='保留时间戳')
     
     args = parser.parse_args()
     
-   # 加载API配置
+    # 加载API配置
     api_config = load_api_config(args.api_config_file)
-    print(f"使用API配置: {api_config['url']}")
-    print(f"使用模型: {api_config['model_name']}")
     
-    # 检查字幕文件是否存在
-    subtitle_file = 'subtitles/word_level.vtt'
-    if not os.path.exists(subtitle_file):
-        print(f"错误: 找不到字幕文件 {subtitle_file}")
+    # 读取处理后的字幕文件
+    input_file = 'subtitles/word_level_processed.txt'
+    if not os.path.exists(input_file):
+        print(f"错误: 找不到输入文件 {input_file}")
         sys.exit(1)
     
     # 读取文件内容
-    paragraphs = read_file(subtitle_file)
+    paragraphs = read_file(input_file)
     
     # 分段处理
     segments = segment_paragraphs(paragraphs, segment_size=args.segment_size, keep_timestamps=args.keep_timestamps)
@@ -285,29 +283,17 @@ def main():
     for i, segment in enumerate(segments):
         print(f"\n[段落 {i+1}/{len(segments)}] 正在翻译: {segment[:250]}...")
         
-        try:
-            translated_text = translate_text(segment, api_config)
-            if translated_text:
-                translated_segments.append(translated_text)
-                print(f"[段落 {i+1}/{len(segments)}] 翻译完成")
-            else:
-                print(f"[段落 {i+1}/{len(segments)}] 翻译失败，跳过此段落")
-        except Exception as e:
-            print(f"[段落 {i+1}/{len(segments)}] 处理错误: {e}")
-            continue
-    
-    # 打印翻译统计
-    print("\n翻译统计:")
-    print(f"总段落数: {len(segments)}")
-    print(f"成功翻译的段落数: {len(translated_segments)}")
-    if len(translated_segments) < len(segments):
-        print(f"警告: {len(segments) - len(translated_segments)} 个段落翻译失败")
+        translated_text = translate_text(segment, api_config)
+        if translated_text:
+            translated_segments.append(translated_text)
+            print(f"[段落 {i+1}/{len(segments)}] 翻译完成")
+        else:
+            print(f"[段落 {i+1}/{len(segments)}] 翻译失败，跳过此段落")
     
     # 保存翻译结果
-    output_file = os.path.splitext(subtitle_file)[0] + "_translated.txt"
+    output_file = os.path.splitext(input_file)[0] + '_translated.txt'
     save_translation(translated_segments, output_file, keep_timestamps=args.keep_timestamps)
     print(f"\n翻译完成，结果已保存到: {output_file}")
 
 if __name__ == "__main__":
     main()
- 

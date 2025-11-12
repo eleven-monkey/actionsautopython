@@ -31,7 +31,7 @@ on:
       use_cookies:
         description: '使用cookies (需要先设置YOUTUBE_COOKIES secret)'
         required: true
-        default: 'true'
+        default: 'false'
         type: boolean
 
 jobs:
@@ -81,12 +81,20 @@ jobs:
             python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
           fi
           
-      - name: 翻译字幕
+      - name: 翻译字幕（保留时间戳）
+        if: github.event.inputs.keep_timestamps == 'true'
         run: |
           python translate_subtitles.py \
             --api_config_file api_config.json \
             --segment_size "${{ github.event.inputs.segment_size }}" \
-            --keep_timestamps "${{ github.event.inputs.keep_timestamps }}"
+            --keep_timestamps
+            
+      - name: 翻译字幕（不保留时间戳）
+        if: github.event.inputs.keep_timestamps != 'true'
+        run: |
+          python translate_subtitles.py \
+            --api_config_file api_config.json \
+            --segment_size "${{ github.event.inputs.segment_size }}"
             
       - name: 上传翻译结果
         uses: actions/upload-artifact@v4
