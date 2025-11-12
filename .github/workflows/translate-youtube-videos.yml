@@ -1,0 +1,79 @@
+name: 翻译YouTube视频
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'YouTube视频URL'
+        required: true
+        type: string
+      api_config_name:
+        description: 'API配置名称 (在仓库secrets中配置)'
+        required: true
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - openai
+          - claude
+          - custom1
+          - custom2
+      segment_size:
+        description: '分段大小 (每次翻译的段落数)'
+        required: true
+        default: '3'
+        type: string
+      keep_timestamps:
+        description: '保留时间戳'
+        required: true
+        default: 'false'
+        type: boolean
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v3
+        
+      - name: 设置Python环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp requests
+          
+      - name: 创建字幕目录
+        run: mkdir -p subtitles
+        
+      - name: 创建API配置文件
+        run: |
+          cat > api_config.json << EOF
+          {
+            "url": "${{ secrets[format('API_URL_{0}', github.event.inputs.api_config_name)] }}",
+            "api_key": "${{ secrets[format('API_KEY_{0}', github.event.inputs.api_config_name)] }}",
+            "model_name": "${{ secrets[format('API_MODEL_{0}', github.event.inputs.api_config_name)] }}"
+          }
+          EOF
+          
+      - name: 下载YouTube字幕
+        run: |
+          python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
+          
+      - name: 翻译字幕
+        env:
+          API_CONFIG_FILE: api_config.json
+        run: |
+          python translate_subtitles.py \
+            --api_config_file api_config.json \
+            --segment_size "${{ github.event.inputs.segment_size }}" \
+            --keep_timestamps "${{ github.event.inputs.keep_timestamps }}"
+            
+      - name: 上传翻译结果
+        uses: actions/upload-artifact@v3
+        with:
+          name: translated-subtitles
+          path: subtitles/*_translated.txt
