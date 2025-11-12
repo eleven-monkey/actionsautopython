@@ -1,0 +1,35 @@
+# .github/workflows/run-python.yml
+
+# 1. 工作流程的名称
+name: Run Python Script Manually
+
+# 2. 触发工作流程的事件
+on:
+  # 允许你手动从 GitHub UI 的 Actions 标签页运行此工作流程
+  workflow_dispatch:
+
+# 3. 工作流程要执行的任务（一个或多个作业）
+jobs:
+  # 3.1 定义一个作业，ID 为 run-script
+  run-script:
+    # 3.1.1 指定作业运行的虚拟机环境
+    runs-on: ubuntu-latest
+
+    # 3.1.2 作业包含的步骤序列
+    steps:
+      # 3.1.2.1 步骤 1: 检出代码
+      - name: Checkout repository content
+        # 使用官方提供的 action，它会把你的仓库代码下载到虚拟机里
+        uses: actions/checkout@v4
+
+      # 3.1.2.2 步骤 2: 设置 Python 环境
+      - name: Set up Python environment
+        # 使用官方提供的 action，它会安装指定版本的 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # 指定你需要的 Python 版本
+
+      # 3.1.2.3 步骤 3: 运行 Python 脚本
+      - name: Execute the Python script
+        # 使用 shell 命令来运行我们的脚本
+        run: python hello.py
