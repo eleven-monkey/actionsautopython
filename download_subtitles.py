@@ -12,7 +12,7 @@ def download_subtitles(url):
         'writeautomaticsub': True,       # 下载自动生成的字幕
         'skip_download': True,           # 跳过视频下载
         'subtitleslangs': ['en'],       # 下载英文字幕
-        'cookies':'cookies.txt'
+        'cookies':'cookies.txt',        #使用cookies
         'quiet': True,                   # 减少控制台输出
         'outtmpl': 'subtitles/%(title)s.%(ext)s'  # 字幕输出路径模板
     }
