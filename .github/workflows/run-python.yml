@@ -7,6 +7,11 @@ name: Run Python Script Manually
 on:
   # 允许你手动从 GitHub UI 的 Actions 标签页运行此工作流程
   workflow_dispatch:
+    inputs:
+      greeting_name:
+        description: 'Who to greet?'
+        required: true
+        default: 'World'
 
 # 3. 工作流程要执行的任务（一个或多个作业）
 jobs:
@@ -32,4 +37,6 @@ jobs:
       # 3.1.2.3 步骤 3: 运行 Python 脚本
       - name: Execute the Python script
         # 使用 shell 命令来运行我们的脚本
+        env:
+          GREETING_NAME: ${{ github.event.inputs.greeting_name }}
         run: python hello.py
