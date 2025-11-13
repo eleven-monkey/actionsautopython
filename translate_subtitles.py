@@ -7,6 +7,9 @@ import json
 import sys
 from random import random
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
+import threading
 
 # 定义系统提示词常量
 SYSTEM_PROMPT = """# Role: 专业翻译官
@@ -56,6 +59,11 @@ SYSTEM_PROMPT = """# Role: 专业翻译官
 
 ## Initialization
 请提供需要翻译的文本内容，我将严格遵守上述规则进行处理。"""
+
+# 线程锁用于保护共享资源
+progress_lock = threading.Lock()
+completed_count = 0
+total_count = 0
 
 def load_api_config(config_file):
     """从JSON文件加载API配置"""
@@ -128,11 +136,14 @@ def contains_chinese(text):
     chinese_pattern = re.compile(r'[\u4E00-\u9FFF\uF900-\uFAFF\u3400-\u4DBF]')
     return bool(chinese_pattern.search(text))
 
-def translate_text(text, api_config, max_retries=5):
+def translate_text_worker(segment_data, api_config, max_retries=5):
     """
-    调用大语言模型API翻译文本
-    添加重试机制，直到获得包含中文的翻译结果或达到最大重试次数
+    工作者函数，用于并行翻译文本
+    segment_data: (index, text) 元组
     """
+    global completed_count, total_count
+    
+    segment_index, text = segment_data
     url = api_config['url']
     headers = {
         "Content-Type": "application/json",
@@ -164,7 +175,6 @@ def translate_text(text, api_config, max_retries=5):
         try:
             if retry_count > 0:
                 delay = base_delay * (2 ** (retry_count - 1)) + (random() * 0.5)
-                print(f"第{retry_count}次重试，等待{delay:.2f}秒后继续...")
                 time.sleep(delay)
 
             response = requests.post(url, json=data, headers=headers, proxies={"http": None, "https": None})
@@ -178,24 +188,23 @@ def translate_text(text, api_config, max_retries=5):
                 pass
 
             if translated_content and contains_chinese(translated_content):
-                print(f"翻译成功! (尝试次数: {retry_count + 1})")
-                print(f"状态码: {response.status_code}")
-                print(f"模型: {result.get('model', '未返回model信息')}")
-                print("\n翻译内容预览:")
-                preview = translated_content[:200] + ("..." if len(translated_content) > 200 else "")
-                print(preview)
-                print("\n")
-                return translated_content
+                # 使用线程锁来安全地更新进度
+                with progress_lock:
+                    completed_count += 1
+                    print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} 翻译成功! (尝试次数: {retry_count + 1})")
+                    if completed_count % 5 == 0 or completed_count == total_count:  # 每5个或最后一个显示详细信息
+                        print(f"状态码: {response.status_code}")
+                        print(f"模型: {result.get('model', '未返回model信息')}")
+                        preview = translated_content[:200] + ("..." if len(translated_content) > 200 else "")
+                        print(f"翻译内容预览: {preview}")
+                        print()
+                return segment_index, translated_content
             elif translated_content and not contains_chinese(translated_content):
-                print(f"翻译内容未包含中文 (尝试次数: {retry_count + 1}/{max_retries})")
-                print("API返回数据:")
-                print(json.dumps(result, indent=2, ensure_ascii=False))
+                print(f"[段落 {segment_index + 1}] 翻译内容未包含中文 (尝试次数: {retry_count + 1}/{max_retries})")
                 retry_count += 1
-                continue  # 如果没有找到中文则重试
+                continue
             else:
-                print(f"翻译失败或内容为空 (尝试次数: {retry_count + 1}/{max_retries})")
-                print("API返回数据:")
-                print(json.dumps(result, indent=2, ensure_ascii=False))
+                print(f"[段落 {segment_index + 1}] 翻译失败或内容为空 (尝试次数: {retry_count + 1}/{max_retries})")
                 retry_count += 1
                 continue
 
@@ -206,7 +215,7 @@ def translate_text(text, api_config, max_retries=5):
             except Exception:
                 pass
 
-            print(f"HTTP错误 (尝试次数: {retry_count + 1}/{max_retries})")
+            print(f"[段落 {segment_index + 1}] HTTP错误 (尝试次数: {retry_count + 1}/{max_retries})")
             if response.status_code == 502:
                 print(f"网关错误 (502): {error_text}")
             else:
@@ -215,21 +224,19 @@ def translate_text(text, api_config, max_retries=5):
             continue
 
         except requests.exceptions.RequestException as err:
-            print(f"请求错误 (尝试次数: {retry_count + 1}/{max_retries}): {err}")
+            print(f"[段落 {segment_index + 1}] 请求错误 (尝试次数: {retry_count + 1}/{max_retries}): {err}")
             retry_count += 1
             continue
         except Exception as e:
-            print(f"其他错误 (尝试次数: {retry_count + 1}/{max_retries}): {e}")
-            try:
-                print("API原始响应:")
-                print(json.dumps(result, indent=2, ensure_ascii=False))
-            except Exception:
-                print("无法获取API响应")
+            print(f"[段落 {segment_index + 1}] 其他错误 (尝试次数: {retry_count + 1}/{max_retries}): {e}")
             retry_count += 1
             continue
 
-    print(f"达到最大重试次数({max_retries})，翻译失败")
-    return None
+    with progress_lock:
+        completed_count += 1
+        print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} 达到最大重试次数({max_retries})，翻译失败")
+    
+    return segment_index, None
 
 def filter_think_tags(text):
     """过滤掉文本中的<think></think>标签及其中的内容"""
@@ -258,10 +265,12 @@ def save_translation(translated_segments, output_path, keep_timestamps=False):
             file.write(filtered_segment + "\n\n")
 
 def main():
-    parser = argparse.ArgumentParser(description='翻译字幕文件')
+    parser = argparse.ArgumentParser(description='翻译字幕文件（支持并行处理）')
     parser.add_argument('--api_config_file', required=True, help='API配置文件路径')
     parser.add_argument('--segment_size', type=int, default=3, help='分段大小')
     parser.add_argument('--keep_timestamps', action='store_true', help='保留时间戳')
+    parser.add_argument('--max_workers', type=int, default=5, help='最大并行工作线程数')
+    parser.add_argument('--show_progress', action='store_true', help='显示详细进度信息')
     
     args = parser.parse_args()
     
@@ -280,22 +289,69 @@ def main():
     # 分段处理
     segments = segment_paragraphs(paragraphs, segment_size=args.segment_size, keep_timestamps=args.keep_timestamps)
     
-    # 翻译每个段落
-    translated_segments = []
-    for i, segment in enumerate(segments):
-        print(f"\n[段落 {i+1}/{len(segments)}] 正在翻译: {segment[:250]}...")
+    print(f"开始并行翻译任务...")
+    print(f"总共 {len(segments)} 个段落，使用 {args.max_workers} 个并行工作线程")
+    print(f"预计可提升性能 {min(args.max_workers, len(segments))} 倍")
+    
+    start_time = time.time()
+    
+    # 并行翻译所有段落
+    translated_results = {}
+    
+    # 准备任务数据：(索引, 文本) 元组
+    tasks = [(i, segment) for i, segment in enumerate(segments)]
+    
+    global completed_count, total_count
+    completed_count = 0
+    total_count = len(segments)
+    
+    # 使用线程池进行并行处理
+    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        # 提交所有翻译任务
+        future_to_index = {
+            executor.submit(translate_text_worker, task_data, api_config): task_data[0] 
+            for task_data in tasks
+        }
         
-        translated_text = translate_text(segment, api_config)
+        # 收集结果
+        for future in as_completed(future_to_index):
+            try:
+                segment_index, translated_text = future.result()
+                if translated_text:
+                    translated_results[segment_index] = translated_text
+            except Exception as e:
+                segment_index = future_to_index[future]
+                print(f"[段落 {segment_index + 1}] 任务执行失败: {e}")
+                translated_results[segment_index] = None
+    
+    end_time = time.time()
+    total_time = end_time - start_time
+    
+    # 按原始顺序整理翻译结果
+    translated_segments = []
+    failed_count = 0
+    for i in range(len(segments)):
+        translated_text = translated_results.get(i)
         if translated_text:
             translated_segments.append(translated_text)
-            print(f"[段落 {i+1}/{len(segments)}] 翻译完成")
         else:
-            print(f"[段落 {i+1}/{len(segments)}] 翻译失败，跳过此段落")
+            failed_count += 1
+            print(f"[警告] 段落 {i + 1} 翻译失败")
     
     # 保存翻译结果
     output_file = os.path.splitext(input_file)[0] + '_translated.txt'
     save_translation(translated_segments, output_file, keep_timestamps=args.keep_timestamps)
-    print(f"\n翻译完成，结果已保存到: {output_file}")
+    
+    print(f"\n=== 翻译任务完成 ===")
+    print(f"总段落数: {len(segments)}")
+    print(f"成功翻译: {len(translated_segments)} 个段落")
+    print(f"失败段落: {failed_count} 个")
+    print(f"并行工作线程: {args.max_workers} 个")
+    print(f"总耗时: {total_time:.2f} 秒")
+    print(f"平均每段耗时: {total_time/len(segments):.2f} 秒")
+    if len(translated_segments) > 0:
+        print(f"性能提升: 相比串行处理，预计提升 {min(args.max_workers, len(segments))} 倍")
+    print(f"结果已保存到: {output_file}")
 
 if __name__ == "__main__":
     main()
