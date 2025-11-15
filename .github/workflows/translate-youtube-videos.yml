@@ -21,7 +21,7 @@ on:
       segment_size:
         description: '分段大小 (每次翻译的段落数)'
         required: true
-        default: '3'
+        default: '6'
         type: string
       keep_timestamps:
         description: '保留时间戳'
@@ -33,6 +33,16 @@ on:
         required: true
         default: 'false'
         type: boolean
+      # 新增的输入：朗读音色
+      voice_name:
+        description: '朗读音色'
+        required: true
+        default: 'zh-CN-XiaoxiaoNeural'
+        type: choice
+        options:
+          - zh-CN-XiaoxiaoNeural
+          - zh-CN-YunjianNeural
+          - zh-CN-YunxiNeural
 
 jobs:
   translate:
@@ -95,9 +105,14 @@ jobs:
           python translate_subtitles.py \
             --api_config_file api_config.json \
             --segment_size "${{ github.event.inputs.segment_size }}"
+
+      # 新增的步骤：运行TTS脚本
+      - name: 生成语音
+        run: |
+          python tts.py --filepath 'subtitles/word_level_processed.txt' --char "${{ github.event.inputs.voice_name }}"
             
-      - name: 上传翻译结果
+      - name: 上传翻译语音
         uses: actions/upload-artifact@v4
         with:
-          name: translated-subtitles
-          path: subtitles/*_translated.txt
+          name: translated-audios
+          path: subtitles/*_translated.mp3
