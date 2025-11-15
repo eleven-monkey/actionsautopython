@@ -66,29 +66,51 @@ def clean_existing_files(file_pattern: str) -> None:
 
 def download_youtube_video(url: str, output_path: str, cookies_file: str = None) -> bool:
     """下载YouTube视频（仅视频流）"""
-    ydl_opts = {
-        'format': 'bestvideo[height<=1080]',  # 下载最高1080p的视频流
-        'outtmpl': output_path,
-        'noplaylist': True,  # 不下载播放列表
-    }
+    # 尝试多种格式选择器，从最具体到最通用
+    format_selectors = [
+        'bestvideo[height<=1080]',  # 首选：最高1080p的视频流
+        'bestvideo[height<=720]',   # 备选：最高720p的视频流
+        'bestvideo',               # 最后备选：任何可用的视频流
+        'best[height<=1080]',      # 如果单独视频流不可用，尝试包含音频的
+        'best[height<=720]',       # 较低分辨率版本
+        'best'                     # 最后的备选方案
+    ]
+    
+    for format_selector in format_selectors:
+        print(f"尝试使用格式选择器: {format_selector}")
+        
+        ydl_opts = {
+            'format': format_selector,
+            'outtmpl': output_path,
+            'noplaylist': True,  # 不下载播放列表
+        }
 
-    # 添加cookies支持
-    if cookies_file and os.path.exists(cookies_file):
-        ydl_opts['cookiefile'] = cookies_file
-        print(f"使用cookies文件: {cookies_file}")
+        # 添加cookies支持
+        if cookies_file and os.path.exists(cookies_file):
+            ydl_opts['cookiefile'] = cookies_file
+            print(f"使用cookies文件: {cookies_file}")
 
-    print(f"正在从URL下载视频: {url}")
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        print(f"视频已成功下载到 {output_path}")
-        return True
-    except yt_dlp.DownloadError as e:
-        print(f"YouTube视频下载错误: {e}")
-        return False
-    except Exception as e:
-        print(f"下载视频时发生意外错误: {e}")
-        return False
+        print(f"正在从URL下载视频: {url}")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            print(f"视频已成功下载到 {output_path}")
+            return True
+        except yt_dlp.DownloadError as e:
+            print(f"使用格式 {format_selector} 下载失败: {e}")
+            if "Requested format is not available" in str(e):
+                # 如果格式不可用，尝试下一个格式选择器
+                continue
+            else:
+                # 如果是其他错误，直接返回失败
+                return False
+        except Exception as e:
+            print(f"下载视频时发生意外错误: {e}")
+            return False
+    
+    # 所有格式选择器都失败了
+    print("所有格式选择器都失败了，无法下载视频")
+    return False
 
 
 def replace_audio_track(video_path: str, audio_path: str, output_path: str) -> bool:
