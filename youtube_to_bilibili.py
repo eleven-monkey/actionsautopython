@@ -220,7 +220,7 @@ def generate_tags_by_ai(title: str, api_config: Dict[str, Any]) -> str:
         print(f"生成标签时出错: {e}")
         return "科普"  # 返回默认标签
 
-def generate_upload_config(youtube_url: str, api_config_file: str, output_path: str) -> Dict[str, Any]:
+def generate_upload_config(youtube_url: str, api_config_file: str, output_path: str, cookies_file: str = None) -> Dict[str, Any]:
     """生成上传配置文件，包括翻译标题"""
     # 使用load_api_config函数读取API配置
     api_config = load_api_config(api_config_file)
@@ -233,6 +233,11 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
         'skip_download': True,  # 跳过下载
         'print': '%(title)s',   # 输出标题
     }
+    
+    # --- 关键修正：添加cookies支持 ---
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts['cookiefile'] = cookies_file
+        print(f"获取标题时使用cookies文件: {cookies_file}")
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -420,7 +425,8 @@ def main():
     clean_existing_files('cover.*')
     
     # 步骤1: 生成上传配置（包括翻译标题）
-    upload_config = generate_upload_config(args.url, api_config_file_path, upload_config_path)
+    # --- 关键修正：传递cookies文件路径 ---
+    upload_config = generate_upload_config(args.url, api_config_file_path, upload_config_path, cookies_file_path)
     if not upload_config:
         print("生成上传配置失败，终止流程")
         return 1
