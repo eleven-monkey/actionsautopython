@@ -371,15 +371,26 @@ def main():
     
     args = parser.parse_args()
     
-    # --- 关键修正：获取音频文件的绝对路径 ---
+    # --- 关键修正：获取GitHub工作空间目录 ---
     github_workspace = os.environ.get('GITHUB_WORKSPACE')
     if not github_workspace:
         # 如果不在 GitHub Actions 环境中，则假设是当前目录
         print("警告: 未在GitHub Actions环境中运行，将使用当前目录作为根目录。")
         github_workspace = '.'
 
+    # --- 关键修正：获取所有文件的绝对路径 ---
     translated_audio_path = os.path.join(github_workspace, 'subtitles', 'word_level_processed_translated.mp3')
+    api_config_file_path = os.path.join(github_workspace, args.api_config)
+    
+    if args.cookies:
+        cookies_file_path = os.path.join(github_workspace, args.cookies)
+    else:
+        cookies_file_path = None
+    
     print(f"正在查找翻译后的音频文件，预期路径: {translated_audio_path}")
+    print(f"正在查找API配置文件，预期路径: {api_config_file_path}")
+    if cookies_file_path:
+        print(f"正在查找cookies文件，预期路径: {cookies_file_path}")
     
     # 确保工作目录存在
     os.makedirs(args.work_dir, exist_ok=True)
@@ -409,13 +420,13 @@ def main():
     clean_existing_files('cover.*')
     
     # 步骤1: 生成上传配置（包括翻译标题）
-    upload_config = generate_upload_config(args.url, args.api_config, upload_config_path)
+    upload_config = generate_upload_config(args.url, api_config_file_path, upload_config_path)
     if not upload_config:
         print("生成上传配置失败，终止流程")
         return 1
     
     # 步骤2: 下载YouTube视频
-    if not download_youtube_video(args.url, downloaded_video_path, args.cookies):
+    if not download_youtube_video(args.url, downloaded_video_path, cookies_file_path):
         print("视频下载失败，终止流程")
         return 1
     
@@ -425,7 +436,7 @@ def main():
         return 1
     
     # 步骤4: 下载缩略图
-    if not download_thumbnail(args.url, thumbnail_path, args.cookies):
+    if not download_thumbnail(args.url, thumbnail_path, cookies_file_path):
         print("缩略图下载失败，终止流程")
         return 1
     
