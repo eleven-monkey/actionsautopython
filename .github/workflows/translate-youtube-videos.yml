@@ -114,10 +114,10 @@ jobs:
       # 新增的步骤：运行TTS脚本
       - name: 生成语音
         run: |
-          python tts.py --filepath 'subtitles/word_level_processed.txt' --char "${{ github.event.inputs.voice_name }}"
+          python tts.py --filepath 'subtitles/word_level_processed_translated.txt' --char "${{ github.event.inputs.voice_name }}"
             
       - name: 上传翻译语音
         uses: actions/upload-artifact@v4
         with:
           name: translated-audios
-          path: subtitles/*_processed.mp3
+          path: subtitles/*_translated.mp3
