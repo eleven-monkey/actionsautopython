@@ -349,7 +349,7 @@ def main():
     upload_config_path = os.path.join(args.work_dir, 'upload_config.pkl')
     
     # 翻译后的音频文件路径
-    translated_audio_path = 'subtitles/word_level_translated.mp3'
+    translated_audio_path = 'subtitles/word_level_processed_translated.mp3'
     
     # 检查翻译后的音频文件是否存在
     if not os.path.exists(translated_audio_path):
