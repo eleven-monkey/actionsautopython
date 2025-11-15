@@ -128,6 +128,13 @@ jobs:
           BILIBILI_SESSDATA: ${{ secrets.BILIBILI_SESSDATA }}
           BILIBILI_JCT: ${{ secrets.BILIBILI_JCT }}
         run: |
-          python youtube_to_bilibili.py \
-            --url "${{ github.event.inputs.youtube_url }}" \
-            --api_config api_config.json
+          if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
+            python youtube_to_bilibili.py \
+              --url "${{ github.event.inputs.youtube_url }}" \
+              --api_config api_config.json \
+              --cookies youtube_cookies.txt
+          else
+            python youtube_to_bilibili.py \
+              --url "${{ github.event.inputs.youtube_url }}" \
+              --api_config api_config.json
+          fi

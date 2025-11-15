@@ -20,11 +20,36 @@ from typing import Optional, Dict, Any
 try:
     import yt_dlp
     from PIL import Image
+    # 还原为原始的bilibili_api导入
     from bilibili_api import sync, video_uploader, Credential
 except ImportError as e:
     print(f"错误: 缺少必要的库: {e}")
-    print("请运行: pip install yt-dlp pillow bilibili-api")
+    print("请运行: pip install yt-dlp pillow bilibili-api-python")
     sys.exit(1)
+
+
+def load_api_config(config_file):
+    """从JSON文件加载API配置，参考translate_subtitles.py"""
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        # 验证必要的配置项
+        required_fields = ['url', 'model_name']
+        for field in required_fields:
+            if not config.get(field):
+                raise ValueError(f"配置文件中缺少必要字段: {field}")
+        
+        return config
+    except FileNotFoundError:
+        print(f"错误: 找不到配置文件 {config_file}")
+        return {}
+    except json.JSONDecodeError:
+        print(f"错误: 配置文件 {config_file} 格式不正确")
+        return {}
+    except ValueError as e:
+        print(f"错误: {e}")
+        return {}
 
 
 def clean_existing_files(file_pattern: str) -> None:
@@ -39,13 +64,18 @@ def clean_existing_files(file_pattern: str) -> None:
         print(f"没有找到匹配 {file_pattern} 的文件")
 
 
-def download_youtube_video(url: str, output_path: str) -> bool:
+def download_youtube_video(url: str, output_path: str, cookies_file: str = None) -> bool:
     """下载YouTube视频（仅视频流）"""
     ydl_opts = {
         'format': 'bestvideo[height<=1080]',  # 下载最高1080p的视频流
         'outtmpl': output_path,
         'noplaylist': True,  # 不下载播放列表
     }
+
+    # 添加cookies支持
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts['cookiefile'] = cookies_file
+        print(f"使用cookies文件: {cookies_file}")
 
     print(f"正在从URL下载视频: {url}")
     try:
@@ -88,7 +118,7 @@ def replace_audio_track(video_path: str, audio_path: str, output_path: str) -> b
         return False
 
 
-def download_thumbnail(url: str, output_path: str) -> bool:
+def download_thumbnail(url: str, output_path: str, cookies_file: str = None) -> bool:
     """下载YouTube视频的缩略图"""
     ydl_opts = {
         'skip_download': True,  # 仅提取信息，不下载视频/音频
@@ -97,6 +127,10 @@ def download_thumbnail(url: str, output_path: str) -> bool:
         'noplaylist': True,  # 不处理播放列表
         'extractor-args': "youtube:player_js_version=actual"
     }
+
+    # 添加cookies支持
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts['cookiefile'] = cookies_file
 
     print(f"正在下载URL的缩略图: {url}")
     try:
@@ -164,7 +198,7 @@ def generate_tags_by_ai(title: str, api_config: Dict[str, Any]) -> str:
 """
     
     payload = {
-        "model": "THUDM/GLM-4-9B-0414",
+        "model": "THUDM/GLM-4-9B-0414",  # 保持硬编码的模型名
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": title}
@@ -188,12 +222,10 @@ def generate_tags_by_ai(title: str, api_config: Dict[str, Any]) -> str:
 
 def generate_upload_config(youtube_url: str, api_config_file: str, output_path: str) -> Dict[str, Any]:
     """生成上传配置文件，包括翻译标题"""
-    # 读取API配置
-    try:
-        with open(api_config_file, 'r') as f:
-            api_config = json.load(f)
-    except Exception as e:
-        print(f"读取API配置文件失败: {e}")
+    # 使用load_api_config函数读取API配置
+    api_config = load_api_config(api_config_file)
+    if not api_config:
+        print("无法加载API配置")
         return {}
     
     # 获取YouTube视频标题
@@ -227,7 +259,7 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
 """
     
     payload = {
-        "model": "THUDM/GLM-4-9B-0414",
+        "model": "THUDM/GLM-4-9B-0414",  # 保持硬编码的模型名
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": title}
@@ -285,8 +317,9 @@ async def upload_to_bilibili(video_path: str, cover_path: str, config: Dict[str,
                            credential: Credential, max_retries: int = 6) -> bool:
     """上传视频到B站"""
     title_desc = config.get('title_desc', '默认标题')
-    tags = config.get('tags', '默认标签')
+    tags = config.get('tags', ['默认标签'])
     
+    # 还原为原始的video_uploader调用
     vu_meta = video_uploader.VideoMeta(
         tid=130,  # 音乐分类
         title=title_desc,
@@ -334,8 +367,19 @@ def main():
     parser.add_argument('--url', required=True, help='YouTube视频URL')
     parser.add_argument('--api_config', required=True, help='API配置文件路径')
     parser.add_argument('--work_dir', default='/tmp', help='工作目录')
+    parser.add_argument('--cookies', help='YouTube cookies文件路径')
     
     args = parser.parse_args()
+    
+    # --- 关键修正：获取音频文件的绝对路径 ---
+    github_workspace = os.environ.get('GITHUB_WORKSPACE')
+    if not github_workspace:
+        # 如果不在 GitHub Actions 环境中，则假设是当前目录
+        print("警告: 未在GitHub Actions环境中运行，将使用当前目录作为根目录。")
+        github_workspace = '.'
+
+    translated_audio_path = os.path.join(github_workspace, 'subtitles', 'word_level_processed_translated.mp3')
+    print(f"正在查找翻译后的音频文件，预期路径: {translated_audio_path}")
     
     # 确保工作目录存在
     os.makedirs(args.work_dir, exist_ok=True)
@@ -348,19 +392,16 @@ def main():
     compressed_thumbnail_path = os.path.join(args.work_dir, 'cover.jpeg')
     upload_config_path = os.path.join(args.work_dir, 'upload_config.pkl')
     
-    # --- 关键修正：获取音频文件的绝对路径 ---
-    github_workspace = os.environ.get('GITHUB_WORKSPACE')
-    if not github_workspace:
-        # 如果不在 GitHub Actions 环境中，则假设是当前目录
-        print("警告: 未在GitHub Actions环境中运行，将使用当前目录作为根目录。")
-        github_workspace = '.'
-
-    translated_audio_path = os.path.join(github_workspace, 'subtitles', 'word_level_processed_translated.mp3')
-    print(f"正在查找翻译后的音频文件，预期路径: {translated_audio_path}")
-    
     # 检查翻译后的音频文件是否存在
     if not os.path.exists(translated_audio_path):
         print(f"错误: 找不到翻译后的音频文件 {translated_audio_path}")
+        # 打印调试信息
+        print(f"当前工作目录: {os.getcwd()}")
+        parent_dir = os.path.dirname(translated_audio_path)
+        if os.path.exists(parent_dir):
+            print(f"文件所在目录 '{parent_dir}' 的内容: {os.listdir(parent_dir)}")
+        else:
+            print(f"文件所在目录 '{parent_dir}' 本身不存在。")
         return 1
     
     # 清理已存在的文件
@@ -374,7 +415,7 @@ def main():
         return 1
     
     # 步骤2: 下载YouTube视频
-    if not download_youtube_video(args.url, downloaded_video_path):
+    if not download_youtube_video(args.url, downloaded_video_path, args.cookies):
         print("视频下载失败，终止流程")
         return 1
     
@@ -384,7 +425,7 @@ def main():
         return 1
     
     # 步骤4: 下载缩略图
-    if not download_thumbnail(args.url, thumbnail_path):
+    if not download_thumbnail(args.url, thumbnail_path, args.cookies):
         print("缩略图下载失败，终止流程")
         return 1
     
@@ -415,6 +456,7 @@ def main():
         buvid3=buvid3
     )
     
+    # 还原为原始的sync调用
     if not sync(upload_to_bilibili(final_video_path, compressed_thumbnail_path, upload_config, credential)):
         print("视频上传失败")
         return 1
