@@ -1,4 +1,4 @@
-name: 翻译YouTube字幕
+name: 翻译YouTube字幕并上传到B站
 
 on:
   workflow_dispatch:
@@ -26,14 +26,13 @@ on:
       keep_timestamps:
         description: '保留时间戳'
         required: true
-        default: 'false'
+        default: 'true'
         type: boolean
       use_cookies:
         description: '使用cookies (需要先设置YOUTUBE_COOKIES secret)'
         required: true
-        default: 'false'
+        default: 'true'
         type: boolean
-      # 新增的输入：朗读音色
       voice_name:
         description: '朗读音色'
         required: true
@@ -45,7 +44,7 @@ on:
           - zh-CN-YunxiNeural
 
 jobs:
-  translate:
+  translate_and_upload:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -62,9 +61,8 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install yt-dlp requests edge_tts==7.2.1 pydub numpy
+          pip install yt-dlp requests edge_tts==7.2.1 pydub numpy pillow bilibili-api
 
-        # 新增的步骤：安装系统依赖
       - name: 安装系统依赖
         run: |
           sudo apt-get install -y ffmpeg
@@ -92,7 +90,7 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
             python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}" --cookies youtube_cookies.txt
-          else
+          else:
             python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
           fi
           
@@ -111,13 +109,15 @@ jobs:
             --api_config_file api_config.json \
             --segment_size "${{ github.event.inputs.segment_size }}"
 
-      # 新增的步骤：运行TTS脚本
       - name: 生成语音
         run: |
           python tts.py --filepath 'subtitles/word_level_processed_translated.txt' --char "${{ github.event.inputs.voice_name }}"
-            
-      - name: 上传翻译语音
-        uses: actions/upload-artifact@v4
-        with:
-          name: translated-audios
-          path: subtitles/*_translated.mp3
+          
+      - name: 上传视频到B站
+        env:
+          BILIBILI_SESSDATA: ${{ secrets.BILIBILI_SESSDATA }}
+          BILIBILI_JCT: ${{ secrets.BILIBILI_JCT }}
+        run: |
+          python youtube_to_bilibili.py \
+            --url "${{ github.event.inputs.youtube_url }}" \
+            --api_config api_config.json
