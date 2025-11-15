@@ -348,8 +348,15 @@ def main():
     compressed_thumbnail_path = os.path.join(args.work_dir, 'cover.jpeg')
     upload_config_path = os.path.join(args.work_dir, 'upload_config.pkl')
     
-    # 翻译后的音频文件路径
-    translated_audio_path = 'subtitles/word_level_processed_translated.mp3'
+    # --- 关键修正：获取音频文件的绝对路径 ---
+    github_workspace = os.environ.get('GITHUB_WORKSPACE')
+    if not github_workspace:
+        # 如果不在 GitHub Actions 环境中，则假设是当前目录
+        print("警告: 未在GitHub Actions环境中运行，将使用当前目录作为根目录。")
+        github_workspace = '.'
+
+    translated_audio_path = os.path.join(github_workspace, 'subtitles', 'word_level_translated.mp3')
+    print(f"正在查找翻译后的音频文件，预期路径: {translated_audio_path}")
     
     # 检查翻译后的音频文件是否存在
     if not os.path.exists(translated_audio_path):
