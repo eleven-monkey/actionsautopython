@@ -62,12 +62,11 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install yt-dlp requests edge_tts pydub numpy
+          pip install yt-dlp requests edge_tts==7.2.1 pydub numpy
 
         # 新增的步骤：安装系统依赖
       - name: 安装系统依赖
         run: |
-          sudo apt-get update
           sudo apt-get install -y ffmpeg
           
       - name: 创建字幕目录
