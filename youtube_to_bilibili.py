@@ -13,6 +13,7 @@ import pickle
 import time
 import json
 import requests
+import asyncio  # 添加了asyncio导入
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -20,7 +21,8 @@ from typing import Optional, Dict, Any
 try:
     import yt_dlp
     from PIL import Image
-    from bilibili_api import sync, video_uploader, Credential
+    # 从这里移除了sync，改用asyncio.run()
+    from bilibili_api import video_uploader, Credential
 except ImportError as e:
     print(f"错误: 缺少必要的库: {e}")
     print("请运行: pip install yt-dlp pillow bilibili-api")
@@ -408,7 +410,8 @@ def main():
         buvid3=buvid3
     )
     
-    if not sync(upload_to_bilibili(final_video_path, compressed_thumbnail_path, upload_config, credential)):
+    # 使用asyncio.run替代sync
+    if not asyncio.run(upload_to_bilibili(final_video_path, compressed_thumbnail_path, upload_config, credential)):
         print("视频上传失败")
         return 1
     
