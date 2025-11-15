@@ -253,16 +253,31 @@ def remove_timestamps(text):
     text_without_timestamps = re.sub(pattern, '', text)
     return text_without_timestamps
 
+def clean_translation_content(content):
+    """清理翻译内容中的多余字符"""
+    # Remove '>', '>>' and '& trash;' characters
+    content_cleaned = content.replace('&gt;', '').replace('>>', '').replace('> ', '').replace('&nbsp;','').replace('_','').replace('＞','')
+    
+    # 额外清理一些可能影响TTS的字符
+    content_cleaned = content_cleaned.replace('&lt;', '').replace('&amp;', '').replace('&quot;', '').replace('--', '—')
+    
+    # 清理多余的空格和换行
+    content_cleaned = ' '.join(content_cleaned.split())
+    
+    return content_cleaned
+
 def save_translation(translated_segments, output_path, keep_timestamps=False):
     """将翻译结果保存到文件"""
     with open(output_path, 'w', encoding='utf-8') as file:
         for segment in translated_segments:
             # 过滤掉思考标签
             filtered_segment = filter_think_tags(segment)
+            # 清理多余字符
+            cleaned_segment = clean_translation_content(filtered_segment)
             # 如果不保留时间戳，则移除时间戳
             if not keep_timestamps:
-                filtered_segment = remove_timestamps(filtered_segment)
-            file.write(filtered_segment + "\n\n")
+                cleaned_segment = remove_timestamps(cleaned_segment)
+            file.write(cleaned_segment + "\n\n")
 
 def main():
     parser = argparse.ArgumentParser(description='翻译字幕文件（支持并行处理）')
