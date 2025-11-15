@@ -88,11 +88,21 @@ jobs:
           
       - name: 下载YouTube字幕
         run: |
+          # 设置遇到错误立即退出，避免后续命令执行
+          set -e
+          echo "===== 开始下载YouTube字幕 ====="
+          echo "YouTube URL: ${{ github.event.inputs.youtube_url }}"
+          echo "是否使用Cookies: ${{ github.event.inputs.use_cookies }}"
+
           if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
+            echo "检测到使用Cookies，开始下载..."
             python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}" --cookies youtube_cookies.txt
-          else:
+          else
+            echo "不使用Cookies，开始下载..."
             python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
           fi
+
+          echo "===== 字幕下载步骤成功完成 ====="
           
       - name: 翻译字幕（保留时间戳）
         if: github.event.inputs.keep_timestamps == 'true'
