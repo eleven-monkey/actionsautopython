@@ -355,7 +355,7 @@ def main():
         print("警告: 未在GitHub Actions环境中运行，将使用当前目录作为根目录。")
         github_workspace = '.'
 
-    translated_audio_path = os.path.join(github_workspace, 'subtitles', 'word_level_translated.mp3')
+    translated_audio_path = os.path.join(github_workspace, 'subtitles', 'word_level_processed_translated.mp3')
     print(f"正在查找翻译后的音频文件，预期路径: {translated_audio_path}")
     
     # 检查翻译后的音频文件是否存在
