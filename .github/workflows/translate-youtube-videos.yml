@@ -111,6 +111,7 @@ jobs:
             --api_config_file api_config.json \
             --segment_size "${{ github.event.inputs.segment_size }}" \
             --keep_timestamps
+            --max_workers 8
             
       - name: 翻译字幕（不保留时间戳）
         if: github.event.inputs.keep_timestamps != 'true'
