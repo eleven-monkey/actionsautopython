@@ -256,7 +256,7 @@ def remove_timestamps(text):
 def clean_translation_content(content):
     """清理翻译内容中的多余字符"""
     # Remove '>', '>>' and '& trash;' characters
-    content_cleaned = content.replace('&gt;', '').replace('>>', '').replace('> ', '').replace('&nbsp;','').replace('_','').replace('＞','')
+    content_cleaned = content.replace('&gt;', '').replace('>>', '').replace('> ', '').replace('&nbsp;','').replace('_','').replace('＞','').replace('[音乐]','')
     
     # 额外清理一些可能影响TTS的字符
     content_cleaned = content_cleaned.replace('&lt;', '').replace('&amp;', '').replace('&quot;', '').replace('--', '—')
