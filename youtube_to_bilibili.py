@@ -28,28 +28,36 @@ except ImportError as e:
     sys.exit(1)
 
 
-def load_api_config(config_file):
-    """从JSON文件加载API配置，参考translate_subtitles.py"""
+def load_api_config(config_file: str) -> Dict[str, Any]:
+    """
+    从JSON文件加载API配置；若文件不存在或字段缺失，则允许使用环境变量作为回退。
+    返回字典，可能包含键：url, api_key, model_name
+    """
+    config = {}
+    if not config_file:
+        return config
+
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        
-        # 验证必要的配置项
-        required_fields = ['url', 'model_name']
-        for field in required_fields:
-            if not config.get(field):
-                raise ValueError(f"配置文件中缺少必要字段: {field}")
-        
-        return config
+            config = json.load(f) or {}
     except FileNotFoundError:
-        print(f"错误: 找不到配置文件 {config_file}")
-        return {}
+        print(f"警告: 找不到配置文件 {config_file}，将尝试从环境变量读取API配置")
+        config = {}
     except json.JSONDecodeError:
-        print(f"错误: 配置文件 {config_file} 格式不正确")
-        return {}
-    except ValueError as e:
-        print(f"错误: {e}")
-        return {}
+        print(f"错误: 配置文件 {config_file} 格式不正确，将尝试从环境变量读取API配置")
+        config = {}
+    except Exception as e:
+        print(f"读取配置文件时发生意外错误: {e}，将尝试从环境变量读取API配置")
+        config = {}
+
+    # 不强制要求所有字段；优先使用文件里的设置，缺失时由环境变量补充
+    final_config = {
+        'url': config.get('url') or os.environ.get('AI_API_URL') or os.environ.get('AI_URL') or '',
+        'api_key': config.get('api_key') or os.environ.get('AI_API_KEY') or os.environ.get('AI_KEY') or '',
+        'model_name': config.get('model_name') or os.environ.get('AI_MODEL') or config.get('model') or ''
+    }
+
+    return final_config
 
 
 def clean_existing_files(file_pattern: str) -> None:
@@ -202,7 +210,11 @@ def convert_and_compress_to_jpeg(input_path: str, output_path: str, target_size_
         return False
 
 def generate_tags_by_ai(title: str, api_config: Dict[str, Any]) -> str:
-    """使用AI根据视频标题生成相关标签"""
+    """使用AI根据视频标题生成相关标签。优先使用api_config中的 model_name/api_key/url，缺失则使用环境变量。"""
+    model = api_config.get('model_name') or os.environ.get('AI_MODEL') or "THUDM/GLM-4-9B-0414"
+    api_url = api_config.get('url') or os.environ.get('AI_API_URL') or os.environ.get('AI_URL') or ''
+    api_key = api_config.get('api_key') or os.environ.get('AI_API_KEY') or os.environ.get('AI_KEY') or ''
+
     system_prompt = """
 # role
 视频内容分析师
@@ -220,7 +232,7 @@ def generate_tags_by_ai(title: str, api_config: Dict[str, Any]) -> str:
 """
     
     payload = {
-        "model": "THUDM/GLM-4-9B-0414",  # 保持硬编码的模型名
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": title}
@@ -228,35 +240,52 @@ def generate_tags_by_ai(title: str, api_config: Dict[str, Any]) -> str:
     }
     
     headers = {
-        "Authorization": f"Bearer {api_config.get('api_key', '')}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
+    if not api_url or not api_key:
+        print("警告: AI api_url 或 api_key 未配置（api_config 或 环境变量），将返回默认标签")
+        return "科普"
+
     try:
-        response = requests.post(api_config.get('url', ''), json=payload, headers=headers)
+        response = requests.post(api_url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
         response_data = response.json()
-        
-        tags = response_data['choices'][0]['message']['content'].strip()
+        # 兼容常见的返回结构
+        tags = None
+        try:
+            tags = response_data['choices'][0]['message']['content'].strip()
+        except Exception:
+            # 其它模型/接口的可能字段
+            try:
+                tags = response_data.get('data', [])[0].get('content', '').strip()
+            except Exception:
+                tags = None
+
+        if not tags:
+            print("警告: AI 返回中未找到标签内容，使用默认标签")
+            return "科普"
+
         return tags
     except Exception as e:
         print(f"生成标签时出错: {e}")
         return "科普"  # 返回默认标签
 
 def generate_upload_config(youtube_url: str, api_config_file: str, output_path: str, cookies_file: str = None) -> Dict[str, Any]:
-    """生成上传配置文件，包括翻译标题"""
-    # 使用load_api_config函数读取API配置
-    api_config = load_api_config(api_config_file)
+    """生成上传配置文件，包括翻译标题。优先使用 JSON 文件中的 model/url/api_key，否则回退到环境变量。"""
+    # 使用load_api_config函数读取API配置（支持回退到环境变量）
+    api_config = load_api_config(api_config_file) or {}
     if not api_config:
-        print("无法加载API配置")
-        return {}
-    
+        print("警告: 未从文件或环境中加载到AI配置，AI翻译将会回退到原始标题。")
+
     # 获取YouTube视频标题
     ydl_opts = {
         'skip_download': True,  # 跳过下载
-        'print': '%(title)s',   # 输出标题
+        'noplaylist': True,
     }
     
-    # --- 关键修正：添加cookies支持 ---
+    # cookies支持
     if cookies_file and os.path.exists(cookies_file):
         ydl_opts['cookiefile'] = cookies_file
         print(f"获取标题时使用cookies文件: {cookies_file}")
@@ -270,7 +299,10 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
         print(f"获取视频标题失败: {e}")
         return {}
     
-    # 翻译标题
+    model = api_config.get('model_name') or os.environ.get('AI_MODEL') or "THUDM/GLM-4-9B-0414"
+    api_url = api_config.get('url') or os.environ.get('AI_API_URL') or os.environ.get('AI_URL') or ''
+    api_key = api_config.get('api_key') or os.environ.get('AI_API_KEY') or os.environ.get('AI_KEY') or ''
+
     system_prompt = """
 # role
 爆款视频up主
@@ -286,7 +318,7 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
 """
     
     payload = {
-        "model": "THUDM/GLM-4-9B-0414",  # 保持硬编码的模型名
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": title}
@@ -294,49 +326,52 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
     }
     
     headers = {
-        "Authorization": f"Bearer {api_config.get('api_key', '')}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
-    try:
-        response = requests.post(api_config.get('url', ''), json=payload, headers=headers)
-        response_data = response.json()
-        
-        # 提取翻译后的标题并移除markdown
-        translated_title = None
+    translated_title = None
+    if not api_url or not api_key:
+        print("警告: AI api_url 或 api_key 未配置（api_config 或 环境变量），将使用原始标题作为翻译结果")
+        translated_title = title
+    else:
         try:
-            translated_title_with_markdown = response_data['choices'][0]['message']['content']
-            # 移除markdown粗体和换行符
-            translated_title = translated_title_with_markdown.replace('**', '').strip()
-        except (KeyError, IndexError, TypeError):
-            print("无法从API响应中提取翻译后的标题。")
-        
-          
-        # 使用AI生成标签
-        tags = generate_tags_by_ai(title, api_config)
-        print(f"生成的标签: {tags}")
-        
-        tags_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
-        
-        # 准备要pickle的数据
-        upload_data = {
-            'title_desc': '(中配)' + translated_title if translated_title else '(中配)' + title,
-            'tags': tags_list
-        }
-        
-        # 序列化并保存到文件
-        try:
-            with open(output_path, 'wb') as f:
-                pickle.dump(upload_data, f)
-            print(f"\n配置已保存到 {output_path}")
-            print("保存的数据:")
-            print(upload_data)
-            return upload_data
+            response = requests.post(api_url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            response_data = response.json()
+            try:
+                translated_title_with_markdown = response_data['choices'][0]['message']['content']
+            except Exception:
+                # 兼容不同返回格式
+                translated_title_with_markdown = response_data.get('data', [])[0].get('content', title) if response_data.get('data') else title
+
+            translated_title = translated_title_with_markdown.replace('**', '').strip() if translated_title_with_markdown else title
         except Exception as e:
-            print(f"保存配置时出错: {e}")
-            return {}
+            print(f"翻译标题时出错: {e}，将使用原始标题作为翻译结果")
+            translated_title = title
+          
+    # 使用AI生成标签
+    tags = generate_tags_by_ai(title, api_config)
+    print(f"生成的标签: {tags}")
+    
+    tags_list = [tag.strip() for tag in tags.split(',') if tag.strip()] if tags else []
+    
+    # 准备要pickle的数据
+    upload_data = {
+        'title_desc': '(中配)' + (translated_title if translated_title else title),
+        'tags': tags_list or ['默认标签']
+    }
+    
+    # 序列化并保存到文件
+    try:
+        with open(output_path, 'wb') as f:
+            pickle.dump(upload_data, f)
+        print(f"\n配置已保存到 {output_path}")
+        print("保存的数据:")
+        print(upload_data)
+        return upload_data
     except Exception as e:
-        print(f"翻译标题时出错: {e}")
+        print(f"保存配置时出错: {e}")
         return {}
 
 
