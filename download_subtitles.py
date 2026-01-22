@@ -3,6 +3,7 @@ import argparse
 import os
 import glob
 import re
+import subprocess
 from yt_dlp import YoutubeDL
 
 # ========== 可调参数 ==========
