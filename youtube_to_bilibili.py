@@ -73,7 +73,7 @@ def clean_existing_files(file_pattern: str) -> None:
 
 
 def download_youtube_video(url: str, output_path: str, cookies_file: str = None) -> bool:
-    """下载YouTube视频（仅视频流）"""
+    """下载YouTube视频（仅视频流），使用 subprocess 调用 yt-dlp"""
     # 尝试多种格式选择器，从最具体到最通用
     format_selectors = [
         'bestvideo[height<=1080]',  # 首选：最高1080p的视频流
@@ -87,31 +87,36 @@ def download_youtube_video(url: str, output_path: str, cookies_file: str = None)
     for format_selector in format_selectors:
         print(f"尝试使用格式选择器: {format_selector}")
         
-        ydl_opts = {
-            'format': format_selector,
-            'outtmpl': output_path,
-            'noplaylist': True,  # 不下载播放列表
-        }
+        cmd = [
+            'yt-dlp',
+            '--extractor-args', 'youtube:player_client=default,-web_safari',
+            '--remote-components', 'ejs:github',
+            '--no-playlist',
+            '-f', format_selector,
+            '-o', output_path,
+            url
+        ]
 
         # 添加cookies支持
         if cookies_file and os.path.exists(cookies_file):
-            ydl_opts['cookiefile'] = cookies_file
+            cmd.insert(1, '--cookies')
+            cmd.insert(2, cookies_file)
             print(f"使用cookies文件: {cookies_file}")
 
         print(f"正在从URL下载视频: {url}")
+        print(f"执行命令: {' '.join(cmd)}")
+        
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            print(f"视频已成功下载到 {output_path}")
-            return True
-        except yt_dlp.DownloadError as e:
-            print(f"使用格式 {format_selector} 下载失败: {e}")
-            if "Requested format is not available" in str(e):
-                # 如果格式不可用，尝试下一个格式选择器
-                continue
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            if result.returncode == 0:
+                print(f"视频已成功下载到 {output_path}")
+                return True
             else:
-                # 如果是其他错误，直接返回失败
-                return False
+                print(f"使用格式 {format_selector} 下载失败: {result.stderr}")
+                if "Requested format is not available" in result.stderr:
+                    continue
+                else:
+                    return False
         except Exception as e:
             print(f"下载视频时发生意外错误: {e}")
             return False
@@ -149,28 +154,33 @@ def replace_audio_track(video_path: str, audio_path: str, output_path: str) -> b
 
 
 def download_thumbnail(url: str, output_path: str, cookies_file: str = None) -> bool:
-    """下载YouTube视频的缩略图"""
-    ydl_opts = {
-        'skip_download': True,  # 仅提取信息，不下载视频/音频
-        'writethumbnail': True,  # 写入缩略图
-        'outtmpl': output_path,
-        'noplaylist': True,  # 不处理播放列表
-        'extractor-args': "youtube:player_js_version=actual"
-    }
+    """下载YouTube视频的缩略图，使用 subprocess 调用 yt-dlp"""
+    cmd = [
+        'yt-dlp',
+        '--extractor-args', 'youtube:player_client=default,-web_safari',
+        '--remote-components', 'ejs:github',
+        '--no-playlist',
+        '--skip-download',
+        '--write-thumbnail',
+        '-o', output_path,
+        url
+    ]
 
     # 添加cookies支持
     if cookies_file and os.path.exists(cookies_file):
-        ydl_opts['cookiefile'] = cookies_file
+        cmd.insert(1, '--cookies')
+        cmd.insert(2, cookies_file)
 
     print(f"正在下载URL的缩略图: {url}")
+    print(f"执行命令: {' '.join(cmd)}")
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
-        print(f"缩略图已成功下载到 {output_path}")
-        return True
-    except yt_dlp.DownloadError as e:
-        print(f"缩略图下载错误: {e}")
-        return False
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        if result.returncode == 0:
+            print(f"缩略图已成功下载") # yt-dlp 会自动添加后缀，output_path 只是模板
+            return True
+        else:
+            print(f"缩略图下载错误: {result.stderr}")
+            return False
     except Exception as e:
         print(f"下载缩略图时发生意外错误: {e}")
         return False
@@ -280,21 +290,35 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
         print("警告: 未从文件或环境中加载到AI配置，AI翻译将会回退到原始标题。")
 
     # 获取YouTube视频标题
-    ydl_opts = {
-        'skip_download': True,  # 跳过下载
-        'noplaylist': True,
-    }
-    
+    cmd = [
+        'yt-dlp',
+        '--extractor-args', 'youtube:player_client=default,-web_safari',
+        '--remote-components', 'ejs:github',
+        '--no-playlist',
+        '--dump-json',
+        '--skip-download',
+        url
+    ] # Note: first arg was renamed to url in this scope, wait, function arg is youtube_url
+
+    # Check function arguments: def generate_upload_config(youtube_url: str, ...
+    cmd[-1] = youtube_url
+
     # cookies支持
     if cookies_file and os.path.exists(cookies_file):
-        ydl_opts['cookiefile'] = cookies_file
+        cmd.insert(1, '--cookies')
+        cmd.insert(2, cookies_file)
         print(f"获取标题时使用cookies文件: {cookies_file}")
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(youtube_url, download=False)
+        print(f"获取标题命令: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        if result.returncode == 0:
+            info_dict = json.loads(result.stdout)
             title = info_dict.get('title', None)
             print(f"视频标题: {title}")
+        else:
+            print(f"获取视频标题失败 (yt-dlp error): {result.stderr}")
+            return {}
     except Exception as e:
         print(f"获取视频标题失败: {e}")
         return {}

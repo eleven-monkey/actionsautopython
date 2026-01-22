@@ -132,29 +132,35 @@ def vtt_to_sentences(vtt_text: str, debug: bool = False) -> str:
 
 def download_subtitles(url, cookies_file=None):
     """下载YouTube视频的字幕"""
-    # 设置下载选项
-    ydl_opts = {
-        'writeautomaticsub': True,       # 下载自动生成的字幕
-        'skip_download': True,           # 跳过视频下载
-        'subtitleslangs': ['en'],       # 下载英文字幕
-        'quiet': True,                   # 减少控制台输出
-        'outtmpl': 'subtitles/%(title)s.%(ext)s',  # 字幕输出路径模板
-        # 添加模拟真实浏览器的选项
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'no_check_certificate': True,    # 跳过证书验证
-    }
+    cmd = [
+        'yt-dlp',
+        '--extractor-args', 'youtube:player_client=default,-web_safari',
+        '--remote-components', 'ejs:github',
+        '--no-playlist',
+        '--write-auto-sub',
+        '--skip-download',
+        '--sub-langs', 'en',
+        '-o', 'subtitles/%(title)s.%(ext)s',
+        url
+    ]
     
     # 如果提供了cookies文件，添加到选项中
     if cookies_file and os.path.exists(cookies_file):
-        ydl_opts['cookiefile'] = cookies_file
+        # We need to insert before other args to be safe, or just append. command line order usually matters for some flags but not file input.
+        # But for --cookies it's a global option usually.
+        cmd.insert(1, '--cookies')
+        cmd.insert(2, cookies_file)
         print(f"使用cookies文件: {cookies_file}")
     else:
         print("未提供cookies文件或文件不存在，尝试无cookies下载")
 
-    # 使用 yt-dlp 下载字幕
+    # 使用 yt-dlp subprocess 下载字幕
+    print(f"执行命令: {' '.join(cmd)}")
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        if result.returncode != 0:
+             print(f"下载失败: {result.stderr}")
+             return None
     except Exception as e:
         print(f"下载失败: {e}")
         return None
