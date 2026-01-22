@@ -64,7 +64,12 @@ jobs:
           python-version: '3.10'
           
       - name: Check Deno version
-        run: deno --version
+        run: |
+          deno --version
+          # Force link deno to /usr/local/bin to make sure yt-dlp can find it
+          sudo ln -s $(which deno) /usr/local/bin/deno
+          ls -l /usr/local/bin/deno
+
 
       - name: 安装依赖
         run: |
