@@ -2,8 +2,8 @@
 import os
 import re
 import asyncio
-import tkinter as tk
-from tkinter import filedialog, ttk
+# import tkinter as tk
+# from tkinter import filedialog, ttk
 import edge_tts
 from pydub import AudioSegment
 import shutil
