@@ -70,7 +70,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install https://github.com/yt-dlp/yt-dlp/archive/master.zip
-          pip install requests edge_tts==7.2.1 pydub numpy pillow bilibili-api-python aiohttp
+          pip install requests edge-tts pydub numpy pillow bilibili-api-python aiohttp
 
       - name: 安装系统依赖
         run: |
