@@ -133,6 +133,11 @@ jobs:
         run: |
           python tts.py --filepath 'subtitles/word_level_processed_translated.txt' --char "${{ github.event.inputs.voice_name }}"
           
+      - name: Debug - List Files
+        run: |
+          ls -R subtitles/
+          ls -l
+
       - name: 上传视频到B站
         env:
           BILIBILI_SESSDATA: ${{ secrets.BILIBILI_SESSDATA }}
