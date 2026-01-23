@@ -54,21 +54,16 @@ jobs:
         uses: actions/checkout@v4
         
       - name: Install Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.x
-
-      - name: 设置Python环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          # Also link to global path as backup
+          sudo ln -sf $HOME/.deno/bin/deno /usr/local/bin/deno
           
       - name: Check Deno version
         run: |
           deno --version
-          # Force link deno to /usr/local/bin to make sure yt-dlp can find it
-          sudo ln -s $(which deno) /usr/local/bin/deno
-          ls -l /usr/local/bin/deno
+          which deno
 
 
       - name: 安装依赖
