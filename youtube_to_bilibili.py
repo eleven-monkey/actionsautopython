@@ -300,7 +300,7 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
         '--no-playlist',
         '--dump-json',
         '--skip-download',
-        url
+        youtube_url
     ] # Note: first arg was renamed to url in this scope, wait, function arg is youtube_url
 
     # Check function arguments: def generate_upload_config(youtube_url: str, ...
