@@ -90,6 +90,7 @@ def download_youtube_video(url: str, output_path: str, cookies_file: str = None)
         cmd = [
             'yt-dlp',
             '--extractor-args', 'youtube:player_client=default,-web_safari',
+            '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
             '--remote-components', 'ejs:github',
             '--no-playlist',
             '-f', format_selector,
@@ -158,6 +159,7 @@ def download_thumbnail(url: str, output_path: str, cookies_file: str = None) -> 
     cmd = [
         'yt-dlp',
         '--extractor-args', 'youtube:player_client=default,-web_safari',
+        '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
         '--remote-components', 'ejs:github',
         '--no-playlist',
         '--skip-download',
@@ -293,6 +295,7 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
     cmd = [
         'yt-dlp',
         '--extractor-args', 'youtube:player_client=default,-web_safari',
+        '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
         '--remote-components', 'ejs:github',
         '--no-playlist',
         '--dump-json',

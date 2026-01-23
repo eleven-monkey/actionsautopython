@@ -136,6 +136,8 @@ def download_subtitles(url, cookies_file=None):
     cmd = [
         'yt-dlp',
         '--extractor-args', 'youtube:player_client=default,-web_safari',
+        # Explicitly point to the Deno path we set up
+        '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
         '--remote-components', 'ejs:github',
         '--no-playlist',
         '--write-auto-sub',
