@@ -450,13 +450,63 @@ async def upload_to_bilibili(video_path: str, cover_path: str, config: Dict[str,
                 return False
 
 
+def upload_to_dailymotion(video_path: str, config: Dict[str, Any]) -> bool:
+    """上传视频到Dailymotion"""
+    # 从环境变量读取Dailymotion凭证
+    dm_api_key = os.environ.get('DM_API_KEY', '')
+    dm_api_secret = os.environ.get('DM_API_SECRET', '')
+    dm_username = os.environ.get('DM_USERNAME', '')
+    dm_password = os.environ.get('DM_PASSWORD', '')
+
+    if not all([dm_api_key, dm_api_secret, dm_username, dm_password]):
+        print("错误: 未设置Dailymotion所需的环境变量（DM_API_KEY, DM_API_SECRET, DM_USERNAME, DM_PASSWORD）")
+        return False
+
+    try:
+        import dailymotion
+    except ImportError:
+        print("错误: 缺少dailymotion库，请运行: pip install dailymotion")
+        return False
+
+    title_desc = config.get('title_desc', '默认标题')
+
+    try:
+        d = dailymotion.Dailymotion()
+        d.set_grant_type(
+            'password',
+            api_key=dm_api_key,
+            api_secret=dm_api_secret,
+            scope=['manage_videos'],
+            info={'username': dm_username, 'password': dm_password}
+        )
+        print(f"正在上传视频到Dailymotion: {video_path}")
+        url = d.upload(video_path)
+        d.post(
+            '/me/videos',
+            {
+                'url': url,
+                'title': title_desc,
+                'is_created_for_kids': 'false',
+                'published': 'true',
+                'channel': 'news'
+            }
+        )
+        print("视频已成功上传到Dailymotion")
+        return True
+    except Exception as e:
+        print(f"上传到Dailymotion时出错: {e}")
+        return False
+
+
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='YouTube视频下载、音轨替换并上传到B站')
+    parser = argparse.ArgumentParser(description='YouTube视频下载、音轨替换并上传')
     parser.add_argument('--url', required=True, help='YouTube视频URL')
     parser.add_argument('--api_config', required=True, help='API配置文件路径')
     parser.add_argument('--work_dir', default='/tmp', help='工作目录')
     parser.add_argument('--cookies', help='YouTube cookies文件路径')
+    parser.add_argument('--upload-bilibili', action='store_true', help='上传到B站')
+    parser.add_argument('--upload-dailymotion', action='store_true', help='上传到Dailymotion')
     
     args = parser.parse_args()
     
@@ -541,29 +591,47 @@ def main():
         print("缩略图压缩失败，终止流程")
         return 1
     
-    # 步骤6: 上传到B站
-    # 从环境变量中读取B站凭证
-    sessdata = os.environ.get('BILIBILI_SESSDATA', '')
-    bili_jct = os.environ.get('BILIBILI_JCT', '')
-    buvid3 = ''  # 硬编码为空字符串
-    
-    if not sessdata or not bili_jct:
-        print("错误: 未设置BILIBILI_SESSDATA或BILIBILI_JCT环境变量")
+    # 步骤6: 根据参数上传到指定网站
+    upload_success = True
+
+    if args.upload_bilibili:
+        # 上传到B站
+        sessdata = os.environ.get('BILIBILI_SESSDATA', '')
+        bili_jct = os.environ.get('BILIBILI_JCT', '')
+        buvid3 = ''  # 硬编码为空字符串
+
+        if not sessdata or not bili_jct:
+            print("错误: 未设置BILIBILI_SESSDATA或BILIBILI_JCT环境变量")
+            upload_success = False
+        else:
+            credential = Credential(
+                sessdata=sessdata,
+                bili_jct=bili_jct,
+                buvid3=buvid3
+            )
+            if not sync(upload_to_bilibili(final_video_path, compressed_thumbnail_path, upload_config, credential)):
+                print("B站视频上传失败")
+                upload_success = False
+            else:
+                print("B站视频上传成功")
+
+    if args.upload_dailymotion:
+        # 上传到Dailymotion
+        if not upload_to_dailymotion(final_video_path, upload_config):
+            print("Dailymotion视频上传失败")
+            upload_success = False
+        else:
+            print("Dailymotion视频上传成功")
+
+    if not args.upload_bilibili and not args.upload_dailymotion:
+        print("警告: 未指定任何上传目标，跳过上传步骤")
+
+    if upload_success:
+        print("整个流程成功完成")
+        return 0
+    else:
+        print("部分上传任务失败")
         return 1
-    
-    credential = Credential(
-        sessdata=sessdata,
-        bili_jct=bili_jct,
-        buvid3=buvid3
-    )
-    
-    # 还原为原始的sync调用
-    if not sync(upload_to_bilibili(final_video_path, compressed_thumbnail_path, upload_config, credential)):
-        print("视频上传失败")
-        return 1
-    
-    print("整个流程成功完成")
-    return 0
 
 
 if __name__ == "__main__":

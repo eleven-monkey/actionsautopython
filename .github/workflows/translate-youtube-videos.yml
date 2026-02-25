@@ -21,7 +21,7 @@ on:
       segment_size:
         description: '分段大小 (每次翻译的段落数)'
         required: true
-        default: '6'
+        default: '11'
         type: string
       keep_timestamps:
         description: '保留时间戳'
@@ -42,6 +42,16 @@ on:
           - zh-CN-XiaoxiaoNeural
           - zh-CN-YunjianNeural
           - zh-CN-YunxiNeural
+      upload_bilibili:
+        description: '上传到B站'
+        required: true
+        default: true
+        type: boolean
+      upload_dailymotion:
+        description: '上传到Dailymotion'
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   translate_and_upload:
@@ -140,6 +150,7 @@ jobs:
           ls -l
 
       - name: 上传视频到B站
+        if: github.event.inputs.upload_bilibili == 'true'
         env:
           BILIBILI_SESSDATA: ${{ secrets.BILIBILI_SESSDATA }}
           BILIBILI_JCT: ${{ secrets.BILIBILI_JCT }}
@@ -148,9 +159,35 @@ jobs:
             python youtube_to_bilibili.py \
               --url "${{ github.event.inputs.youtube_url }}" \
               --api_config api_config.json \
-              --cookies youtube_cookies.txt
+              --cookies youtube_cookies.txt \
+              --upload-bilibili
           else
             python youtube_to_bilibili.py \
               --url "${{ github.event.inputs.youtube_url }}" \
-              --api_config api_config.json
+              --api_config api_config.json \
+              --upload-bilibili
+          fi
+
+      - name: 上传视频到Dailymotion
+        if: github.event.inputs.upload_dailymotion == 'true'
+        env:
+          BILIBILI_SESSDATA: ${{ secrets.BILIBILI_SESSDATA }}
+          BILIBILI_JCT: ${{ secrets.BILIBILI_JCT }}
+          DM_API_KEY: ${{ secrets.DM_API_KEY }}
+          DM_API_SECRET: ${{ secrets.DM_API_SECRET }}
+          DM_USERNAME: ${{ secrets.DM_USERNAME }}
+          DM_PASSWORD: ${{ secrets.DM_PASSWORD }}
+        run: |
+          pip install dailymotion
+          if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
+            python youtube_to_bilibili.py \
+              --url "${{ github.event.inputs.youtube_url }}" \
+              --api_config api_config.json \
+              --cookies youtube_cookies.txt \
+              --upload-dailymotion
+          else
+            python youtube_to_bilibili.py \
+              --url "${{ github.event.inputs.youtube_url }}" \
+              --api_config api_config.json \
+              --upload-dailymotion
           fi
