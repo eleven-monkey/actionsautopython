@@ -179,13 +179,16 @@ def split_text_by_timestamp(text):
     return segments
 
 def adjust_audio_speed(task):
-    """调整音频速度的函数，用于多进程处理"""
+    """
+    调整音频速度的函数，用于多进程处理
+    使用低通滤波器去除调速时产生的刺耳尖啸声
+    """
     i, temp_output, target_duration, speed_factor = task
     temp_output_processed = temp_output + '.processed.mp3'
     try:
         print(f"进程正在调整音频 {i+1} 的速度，原始长度 {target_duration/speed_factor:.0f}ms，目标长度 {target_duration}ms，因子 {speed_factor:.2f}")
         result = subprocess.run(
-            ['ffmpeg', '-y', '-i', temp_output, '-filter:a', f'atempo={speed_factor}',
+            ['ffmpeg', '-y', '-i', temp_output, '-filter:a', f'lowpass=f=8000,atempo={speed_factor}',
              temp_output_processed],
             capture_output=True,
             text=True,
