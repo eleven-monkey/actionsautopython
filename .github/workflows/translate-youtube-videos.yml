@@ -14,14 +14,19 @@ on:
         type: choice
         options:
           - default
-          - openai
-          - claude
+          - qwen36
+          - hy-tm2
           - custom1
           - custom2
       segment_size:
         description: '分段大小 (每次翻译的段落数)'
         required: true
         default: '11'
+        type: string
+      max_workers:
+        description: '并发请求数 (同时翻译的线程数)'
+        required: true
+        default: '8'
         type: string
       keep_timestamps:
         description: '保留时间戳'
@@ -131,14 +136,15 @@ jobs:
             --api_config_file api_config.json \
             --segment_size "${{ github.event.inputs.segment_size }}" \
             --keep_timestamps \
-            --max_workers 8
+            --max_workers "${{ github.event.inputs.max_workers }}"
             
       - name: 翻译字幕（不保留时间戳）
         if: github.event.inputs.keep_timestamps != 'true'
         run: |
           python translate_subtitles.py \
             --api_config_file api_config.json \
-            --segment_size "${{ github.event.inputs.segment_size }}"
+            --segment_size "${{ github.event.inputs.segment_size }}" \
+            --max_workers "${{ github.event.inputs.max_workers }}"
 
       - name: 生成语音
         run: |
