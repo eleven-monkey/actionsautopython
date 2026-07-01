@@ -15,7 +15,7 @@ on:
         options:
           - default
           - qwen36
-          - hy-tm2
+          - hy_mt2
           - custom1
           - custom2
       segment_size:
