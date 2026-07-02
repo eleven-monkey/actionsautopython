@@ -360,19 +360,43 @@ def remove_timestamps(text):
 
 
 def clean_translation_content(content):
-    """清理翻译内容中的多余字符"""
+    """清理翻译内容中的多余字符（只清理字符和行内空白，不合并换行）。
+
+    注意：必须保持原始换行结构，否则会破坏按行组织的字幕格式。
+    """
     content_cleaned = content.replace('&gt;', '').replace('>>', '').replace('> ', '').replace('&nbsp;', '').replace('_', '').replace('＞', '').replace('[音乐]', '')
 
     # 额外清理一些可能影响TTS的字符
     content_cleaned = content_cleaned.replace('&lt;', '').replace('&amp;', '').replace('&quot;', '').replace('--', '—')
 
-    # 清理多余的空格和换行
-    content_cleaned = ' '.join(content_cleaned.split())
+    # 清理行内多余空格（保留换行符）
+    cleaned_lines = [' '.join(line.split()) for line in content_cleaned.splitlines()]
+    content_cleaned = '\n'.join(cleaned_lines)
 
     return content_cleaned
 
 
-def merge_segment_results(segment_index, translated, original_seg, keep_timestamps):
+def clean_translation_line(line):
+    """对单行做字符清洗 + 行内空白规整。"""
+    line = line.replace('&gt;', '').replace('>>', '').replace('> ', '').replace('&nbsp;', '').replace('_', '').replace('＞', '').replace('[音乐]', '')
+    line = line.replace('&lt;', '').replace('&amp;', '').replace('&quot;', '').replace('--', '—')
+    return ' '.join(line.split())
+
+
+def _debug_print_paragraph(segment_index, original_seg, translated_raw, translated_clean, trans_lines):
+    """打印段落原文和译文（仅在 --show_progress 或出现回退时启用）。"""
+    print(f"\n----- [调试] 段落 {segment_index + 1} -----")
+    print(f"  原文 ({len([l for l in original_seg.splitlines() if l.strip()])} 行):")
+    for i, l in enumerate([x for x in original_seg.splitlines() if x.strip()], 1):
+        print(f"    {i:>2}: {l}")
+    print(f"  原始模型返回 (前 500 字符):")
+    print(f"    {repr((translated_raw or '')[:500])}")
+    print(f"  清洗后译文 ({len(trans_lines)} 行):")
+    for i, l in enumerate(trans_lines, 1):
+        print(f"    {i:>2}: {l}")
+
+
+def merge_segment_results(segment_index, translated, original_seg, keep_timestamps, debug=False):
     """合并单个段落的翻译结果，失败时逐行/整段回退到原文。
 
     返回 (out_lines, fallback_count)。
@@ -384,18 +408,27 @@ def merge_segment_results(segment_index, translated, original_seg, keep_timestam
     if not translated:
         # 段落整体失败：每行用原文兜底
         fallback_count += len(original_lines)
+        print(f"  [翻译回退整段] 段落 {segment_index + 1}（译文为 None）")
+        if debug:
+            _debug_print_paragraph(segment_index, original_seg, translated, "", [])
         for line in original_lines:
             out_lines.append(line)
         return out_lines, fallback_count
 
-    # 清洗模型返回
-    translated_clean = filter_think_tags(translated)
-    translated_clean = clean_translation_content(translated_clean)
-    trans_lines = [l.strip() for l in translated_clean.splitlines() if l.strip()]
+    # 清洗：先按行 split，逐行清洗（避免把多行合并为 1 行）
+    raw = filter_think_tags(translated)
+    trans_lines = [
+        clean_translation_line(l)
+        for l in raw.splitlines()
+        if l.strip()
+    ]
 
     # 行数容差：YouTube 自动字幕断句不稳定，模型可能把相邻两行合成一句
     # 因此译文比原文少 1 行也算通过；其他不一致再整段回退到原文
     ALLOWED_LINE_DIFF = 1
+
+    def _emit_line(tl):
+        return remove_timestamps(tl) if not keep_timestamps else tl
 
     if len(trans_lines) == len(original_lines):
         # 逐行校验
@@ -404,45 +437,33 @@ def merge_segment_results(segment_index, translated, original_seg, keep_timestam
             txt = _extract_text_after_ts(tl) if LINE_PATTERN.match(tl) else tl
             ok, _ = is_valid_translation_format(tl)
             if ok and contains_chinese(txt):
-                if not keep_timestamps:
-                    out_lines.append(remove_timestamps(tl))
-                else:
-                    out_lines.append(tl)
+                out_lines.append(_emit_line(tl))
             else:
                 fallback_count += 1
                 print(f"  [翻译回退] 段落 {segment_index + 1} 行: {ol[:60]}")
-                if not keep_timestamps:
-                    out_lines.append(remove_timestamps(ol))
-                else:
-                    out_lines.append(ol)
+                out_lines.append(_emit_line(ol))
     elif len(trans_lines) == len(original_lines) - ALLOWED_LINE_DIFF:
         # 少 1 行：直接采纳译文（断句合并是可接受的）
-        ok, err = is_valid_translation_format(translated_clean)
+        joined = "\n".join(trans_lines)
+        ok, err = is_valid_translation_format(joined)
         if ok:
             print(f"  [翻译少1行通过] 段落 {segment_index + 1}（原{len(original_lines)}行 → 译{len(trans_lines)}行，模型合并断句）")
             for tl in trans_lines:
-                if not keep_timestamps:
-                    out_lines.append(remove_timestamps(tl))
-                else:
-                    out_lines.append(tl)
+                out_lines.append(_emit_line(tl))
         else:
             # 译文本身格式不通过，整段回退
             print(f"  [翻译回退整段] 段落 {segment_index + 1}（译文格式校验失败: {err}）")
             fallback_count += len(original_lines)
             for line in original_lines:
-                if not keep_timestamps:
-                    out_lines.append(remove_timestamps(line))
-                else:
-                    out_lines.append(line)
+                out_lines.append(_emit_line(line))
     else:
         # 行数不一致且超出容差：整段用原文兜底（保守策略，确保对齐）
         print(f"  [翻译回退整段] 段落 {segment_index + 1}（译{len(trans_lines)}行/原{len(original_lines)}行，差值超出 ±{ALLOWED_LINE_DIFF}）")
         fallback_count += len(original_lines)
+        if debug:
+            _debug_print_paragraph(segment_index, original_seg, translated, "\n".join(trans_lines), trans_lines)
         for line in original_lines:
-            if not keep_timestamps:
-                out_lines.append(remove_timestamps(line))
-            else:
-                out_lines.append(line)
+            out_lines.append(_emit_line(line))
 
     return out_lines, fallback_count
 
@@ -533,7 +554,7 @@ def main():
         if not translated_text:
             failed_count += 1
             print(f"[警告] 段落 {i + 1} 翻译失败，整段回退到原文")
-        out_lines, fb = merge_segment_results(i, translated_text, original_seg, keep_timestamps=args.keep_timestamps)
+        out_lines, fb = merge_segment_results(i, translated_text, original_seg, keep_timestamps=args.keep_timestamps, debug=args.show_progress)
         total_fallback_lines += fb
         translated_lines.extend(out_lines)
 
