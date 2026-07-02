@@ -286,11 +286,11 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         data = json.loads(json.dumps(base_data))  # 深拷贝
         if retry_count >= 1 and last_format_err:
             reminder = (
-                "\n\n【重要提醒】上一轮输出存在以下问题，请务必修正：\n"
-                f"- {last_format_err}\n"
-                "- 时间戳必须与原文**逐字相同**（包括每个数字、冒号、点号、毫秒数），不得修改、不得编造、不得调换顺序。\n"
-                "- 行数与原文相同，或在断句合并情况下比原文少 1 行。\n"
-                "- 如果某段时间戳数值看起来很大（例如跨越小时），那是原文的正常情况，保持原样即可，不要"修正"它。"
+                '\n\n【重要提醒】上一轮输出存在以下问题，请务必修正：\n'
+                f'- {last_format_err}\n'
+                '- 时间戳必须与原文**逐字相同**（包括每个数字、冒号、点号、毫秒数），不得修改、不得编造、不得调换顺序。\n'
+                '- 行数与原文相同，或在断句合并情况下比原文少 1 行。\n'
+                '- 如果某段时间戳数值看起来很大（例如跨越小时），那是原文的正常情况，保持原样即可，不要『修正』它。'
             )
             data["messages"][1]["content"] = f" {text}{reminder}"
         return data
