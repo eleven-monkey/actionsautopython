@@ -149,28 +149,81 @@ def _extract_text_after_ts(line):
     return ""
 
 
-def is_valid_translation_format(text):
-    """校验翻译结果格式：每行符合 (HH:MM:SS[.mmm]) 文本，且时间戳严格递增。
+def _extract_ts(line):
+    """从合规行 '(ts) text' 中提取 ts 字符串部分（不含括号）。"""
+    m = LINE_PATTERN.match(line.strip())
+    if m:
+        return m.group(1)
+    return None
 
-    返回 (ok: bool, err: str)。
+
+def _extract_orig_ts_list(segment_text):
+    """从原文段落提取所有时间戳字符串，按出现顺序。"""
+    ts_list = []
+    for line in segment_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        ts = _extract_ts(line)
+        if ts is not None:
+            ts_list.append(ts)
+    return ts_list
+
+
+def is_valid_translation_format(text, orig_ts_list=None):
+    """校验翻译结果格式。
+
+    基础校验：
+      - 每行符合 (HH:MM:SS[.mmm]) 文本
+      - 时间戳严格递增
+    严格校验（当传入 orig_ts_list 时）：
+      - 译文时间戳必须是 orig_ts_list 的子序列
+      - 顺序与原文一致：译文前 k 行时间戳必须能在 orig_ts_list 中找到
+        一段连续子序列与之对应（允许少 1 行合并断句）
+      - 时间戳必须**逐字相同**（LLM 改数字是常见错误，必须拒掉）
+
+    返回 (ok: bool, err: str, trans_ts_list: list[str] | None)。
     """
     if not text or not text.strip():
-        return False, "文本为空"
+        return False, "文本为空", None
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines:
-        return False, "没有有效行"
+        return False, "没有有效行", None
+
+    trans_ts_list = []
     prev_ts = None
     for i, line in enumerate(lines, 1):
-        if not LINE_PATTERN.match(line):
-            return False, f"第{i}行格式不正确: {line[:80]}"
-        # 提取时间戳，检查严格递增
-        ts_match = LINE_PATTERN.match(line)
-        if ts_match:
-            ts = ts_match.group(1)
-            if prev_ts is not None and ts <= prev_ts:
-                return False, f"第{i}行时间戳未递增: {ts} <= {prev_ts}"
-            prev_ts = ts
-    return True, "格式正确"
+        m = LINE_PATTERN.match(line)
+        if not m:
+            return False, f"第{i}行格式不正确: {line[:80]}", None
+        ts = m.group(1)
+        if prev_ts is not None and ts <= prev_ts:
+            return False, f"第{i}行时间戳未递增: {ts} <= {prev_ts}", None
+        trans_ts_list.append(ts)
+        prev_ts = ts
+
+    # 严格对照原文时间戳序列
+    if orig_ts_list is not None:
+        # 允许译文比原文少 1 行（LLM 合并断句）
+        if len(trans_ts_list) > len(orig_ts_list):
+            return False, (
+                f"译文行数({len(trans_ts_list)})超过原文({len(orig_ts_list)})，"
+                f"LLM 可能插入了伪造时间戳"
+            ), trans_ts_list
+        if len(trans_ts_list) < len(orig_ts_list) - 1:
+            return False, (
+                f"译文行数({len(trans_ts_list)})比原文({len(orig_ts_list)})少超过 1 行，"
+                f"LLM 漏译了过多行"
+            ), trans_ts_list
+        # 译文时间戳必须 == orig_ts_list 前 k 项的逐字相同
+        for i, tts in enumerate(trans_ts_list):
+            if tts != orig_ts_list[i]:
+                return False, (
+                    f"第{i+1}行时间戳与原文不符: 译文={tts} != 原文={orig_ts_list[i]}，"
+                    f"LLM 修改了时间戳数字"
+                ), trans_ts_list
+
+    return True, "格式正确", trans_ts_list
 
 
 def normalize_translation(text):
@@ -189,10 +242,17 @@ def normalize_translation(text):
 def translate_text_worker(segment_data, api_config, max_retries=5):
     """并行翻译工作函数，引入：5 次重试 + 纠错阶段（再请求 1 次让模型自修）+
     逐行兜底。返回 (idx, translated, original_seg, normalized_flag)。
+
+    segment_data 接受 (idx, text) 或 (idx, text, orig_ts_list)。
     """
     global completed_count, total_count
 
-    segment_index, text = segment_data
+    if len(segment_data) == 3:
+        segment_index, text, orig_ts_list = segment_data
+    else:
+        segment_index, text = segment_data
+        orig_ts_list = _extract_orig_ts_list(text)
+
     url = api_config['url']
     headers = {
         "Content-Type": "application/json",
@@ -200,7 +260,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
     }
     headers = {k: v for k, v in headers.items() if v is not None}
 
-    data = {
+    base_data = {
         "model": api_config.get('model_name', 'default'),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -219,6 +279,21 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
 
     last_translated = None   # 记录最后一次原始返回，用于纠错阶段
     last_normalized = None   # 记录纠错后的文本
+    last_format_err = None   # 记录最后一次的格式错误信息，用于重试时反馈给模型
+
+    def _build_data(retry_count):
+        """根据重试次数构造请求数据；后续重试附带更明确的提示。"""
+        data = json.loads(json.dumps(base_data))  # 深拷贝
+        if retry_count >= 1 and last_format_err:
+            reminder = (
+                "\n\n【重要提醒】上一轮输出存在以下问题，请务必修正：\n"
+                f"- {last_format_err}\n"
+                "- 时间戳必须与原文**逐字相同**（包括每个数字、冒号、点号、毫秒数），不得修改、不得编造、不得调换顺序。\n"
+                "- 行数与原文相同，或在断句合并情况下比原文少 1 行。\n"
+                "- 如果某段时间戳数值看起来很大（例如跨越小时），那是原文的正常情况，保持原样即可，不要"修正"它。"
+            )
+            data["messages"][1]["content"] = f" {text}{reminder}"
+        return data
 
     for retry_count in range(max_retries):
         try:
@@ -226,6 +301,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
                 delay = 1 * (2 ** (retry_count - 1)) + (random() * 0.5)
                 time.sleep(delay)
 
+            data = _build_data(retry_count)
             response = requests.post(url, json=data, headers=headers, proxies={"http": None, "https": None})
             response.raise_for_status()
             result = response.json()
@@ -241,16 +317,19 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
 
             if not translated_content:
                 print(f"[段落 {segment_index + 1}] 翻译失败或内容为空 (尝试次数: {retry_count + 1}/{max_retries})")
+                last_format_err = "返回内容为空"
                 continue
 
             if not contains_chinese(translated_content):
                 print(f"[段落 {segment_index + 1}] 翻译内容未包含中文 (尝试次数: {retry_count + 1}/{max_retries})")
+                last_format_err = "译文未包含中文"
                 continue
 
-            # 格式校验：行格式 + 时间戳递增
-            ok, err = is_valid_translation_format(translated_content)
+            # 格式校验：行格式 + 时间戳递增 + 严格对照原文时间戳
+            ok, err, _ = is_valid_translation_format(translated_content, orig_ts_list=orig_ts_list)
             if not ok:
                 print(f"[段落 {segment_index + 1}] 格式校验失败 (尝试次数: {retry_count + 1}/{max_retries}): {err}")
+                last_format_err = err
                 continue
 
             with progress_lock:
@@ -277,13 +356,16 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
                 print(f"网关错误 (502): {error_text}")
             else:
                 print(f"HTTP错误: {http_err}, 响应: {error_text}")
+            last_format_err = f"HTTP {response.status_code}"
             continue
 
         except requests.exceptions.RequestException as err:
             print(f"[段落 {segment_index + 1}] 请求错误 (尝试次数: {retry_count + 1}/{max_retries}): {err}")
+            last_format_err = f"请求错误: {err}"
             continue
         except Exception as e:
             print(f"[段落 {segment_index + 1}] 其他错误 (尝试次数: {retry_count + 1}/{max_retries}): {e}")
+            last_format_err = f"其他错误: {e}"
             continue
 
     # 5 次都失败：进入纠错阶段
@@ -292,7 +374,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         normalized = normalize_translation(last_translated)
         if normalized != last_translated:
             last_normalized = normalized
-            ok, err = is_valid_translation_format(normalized)
+            ok, err, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
             if ok:
                 with progress_lock:
                     completed_count += 1
@@ -302,9 +384,10 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         else:
             print(f"[段落 {segment_index + 1}] 5 次重试后仍未通过且无可纠错项，再请求 1 次")
 
-    # 再请求 1 次，让模型自己修复
+    # 再请求 1 次，让模型自己修复（同时附带更明确的提示）
     try:
         time.sleep(1)
+        data = _build_data(max_retries)  # 附带上 last_format_err
         response = requests.post(url, json=data, headers=headers, proxies={"http": None, "https": None}, timeout=60)
         response.raise_for_status()
         result = response.json()
@@ -317,7 +400,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         last_translated = translated
 
         if translated and contains_chinese(translated):
-            ok, err = is_valid_translation_format(translated)
+            ok, err, _ = is_valid_translation_format(translated, orig_ts_list=orig_ts_list)
             if ok:
                 with progress_lock:
                     completed_count += 1
@@ -325,7 +408,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
                 return segment_index, translated, text, True
             # 再纠错一次
             normalized = normalize_translation(translated)
-            ok2, _ = is_valid_translation_format(normalized)
+            ok2, _, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
             if ok2:
                 with progress_lock:
                     completed_count += 1
@@ -435,7 +518,7 @@ def merge_segment_results(segment_index, translated, original_seg, keep_timestam
         for tl, ol in zip(trans_lines, original_lines):
             # 抽取正文并校验
             txt = _extract_text_after_ts(tl) if LINE_PATTERN.match(tl) else tl
-            ok, _ = is_valid_translation_format(tl)
+            ok, _, _ = is_valid_translation_format(tl)
             if ok and contains_chinese(txt):
                 out_lines.append(_emit_line(tl))
             else:
@@ -445,7 +528,7 @@ def merge_segment_results(segment_index, translated, original_seg, keep_timestam
     elif len(trans_lines) == len(original_lines) - ALLOWED_LINE_DIFF:
         # 少 1 行：直接采纳译文（断句合并是可接受的）
         joined = "\n".join(trans_lines)
-        ok, err = is_valid_translation_format(joined)
+        ok, err, _ = is_valid_translation_format(joined)
         if ok:
             print(f"  [翻译少1行通过] 段落 {segment_index + 1}（原{len(original_lines)}行 → 译{len(trans_lines)}行，模型合并断句）")
             for tl in trans_lines:

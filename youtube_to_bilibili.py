@@ -127,58 +127,13 @@ def download_youtube_video(url: str, output_path: str, cookies_file: str = None)
     return False
 
 
-def _ffprobe_duration(path):
-    """用 ffprobe 取容器声明时长（秒），失败返回 None。"""
-    try:
-        result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-             '-of', 'default=noprint_wrappers=1:nokey=1', path],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
-    except Exception as e:
-        print(f"  [ffprobe] 取时长失败 {path}: {e}", flush=True)
-    return None
-
-
-def _ffprobe_streams(path):
-    """列出每个流的类型与时长，方便定位异常流。"""
-    try:
-        result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries',
-             'stream=index,codec_type,duration,bit_rate', '-of', 'csv=p=0', path],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().splitlines():
-                print(f"    {line}", flush=True)
-    except Exception as e:
-        print(f"    ffprobe 失败: {e}", flush=True)
-
-
 def replace_audio_track(video_path: str, audio_path: str, output_path: str) -> bool:
     """使用ffmpeg替换视频的音轨"""
     if not os.path.exists(audio_path):
         print(f"错误: 找不到音频文件 {audio_path}")
         return False
 
-    # 调试：打印输入文件时长
     print(f"正在替换 {video_path} 的音轨为 {audio_path}")
-    print("  [调试] 输入视频流:", flush=True)
-    _ffprobe_streams(video_path)
-    print("  [调试] 输入音频流:", flush=True)
-    _ffprobe_streams(audio_path)
-    video_dur = _ffprobe_duration(video_path)
-    audio_dur = _ffprobe_duration(audio_path)
-    print(f"  [调试] 输入视频时长: {video_dur} s", flush=True)
-    print(f"  [调试] 输入音频时长: {audio_dur} s", flush=True)
-    if video_dur and audio_dur:
-        ratio = audio_dur / video_dur
-        print(f"  [调试] 音/视频时长比: {ratio:.3f}", flush=True)
-        if ratio > 1.1:
-            print(f"  [告警] 音频比视频长 {(ratio-1)*100:.1f}%，可能导致最终视频被拉长！", flush=True)
-
     try:
         # ffmpeg命令: -i input_video -i input_audio -c:v copy -c:a aac -map 0:v:0 -map 1:a:0 output_video
         subprocess.run([
@@ -187,14 +142,6 @@ def replace_audio_track(video_path: str, audio_path: str, output_path: str) -> b
             output_path
         ], check=True)
         print(f"音轨替换完成。最终视频已保存到 {output_path}")
-
-        # 调试：核对最终视频的时长
-        final_dur = _ffprobe_duration(output_path)
-        print(f"  [调试] 输出视频流:", flush=True)
-        _ffprobe_streams(output_path)
-        print(f"  [调试] 输出视频时长: {final_dur} s", flush=True)
-        if final_dur and final_dur > 36000:
-            print(f"  [告警] 输出视频时长超过 10 小时！", flush=True)
         return True
     except subprocess.CalledProcessError as e:
         print(f"ffmpeg处理错误: {e}")
