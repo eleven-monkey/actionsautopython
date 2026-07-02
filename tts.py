@@ -21,6 +21,38 @@ def check_ffmpeg():
         return False
     return True
 
+def ffprobe_duration(path):
+    """用 ffprobe 取文件的容器声明时长（秒），失败返回 None。"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception as e:
+        print(f"  [ffprobe] 取时长失败 {path}: {e}", flush=True)
+    return None
+
+
+def ffprobe_streams(path):
+    """列出每个流的类型、时长、码率，方便定位异常流。"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries',
+             'stream=index,codec_type,duration,bit_rate', '-of', 'csv=p=0', path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().splitlines():
+                print(f"    {line}", flush=True)
+        else:
+            print(f"    (ffprobe 无输出)", flush=True)
+    except Exception as e:
+        print(f"    ffprobe 失败: {e}", flush=True)
+
+
 async def text_to_speech(text, output_file, voice="zh-CN-XiaoxiaoNeural", max_retries=5):
     """
     将文本转换为语音并保存为音频文件
@@ -341,6 +373,20 @@ async def process_text_file(file_path, voice="zh-CN-XiaoxiaoNeural"):
 
         # 3. 关键：一次性混音（替换掉原来的循环 overlay）
         print("开始一次性混音...")
+        # 调试：打印最后一段的位置与长度，用于核对总时长计算
+        if audio_files:
+            last_path, last_ms = audio_files[-1]
+            last_audio = processed_audio_segments[-1][2]
+            expected_total_ms = last_ms + len(last_audio) + 1000
+            print(f"  [调试] 段落总数: {len(audio_files)}", flush=True)
+            print(f"  [调试] 最后段开始时间戳: {last_ms} ms ({last_ms/1000:.2f} s)", flush=True)
+            print(f"  [调试] 最后段音频长度: {len(last_audio)} ms ({len(last_audio)/1000:.2f} s)", flush=True)
+            print(f"  [调试] 预期音频总时长: {expected_total_ms} ms ({expected_total_ms/1000:.2f} s, {expected_total_ms/3600000:.2f} h)", flush=True)
+            # 抽样输出最长/最短的 3 段
+            lengths = [(i, len(processed_audio_segments[i][2])) for i in range(len(processed_audio_segments))]
+            lengths.sort(key=lambda x: x[1], reverse=True)
+            print(f"  [调试] 最长 3 段 (索引, ms): {lengths[:3]}", flush=True)
+            print(f"  [调试] 最短 3 段 (索引, ms): {lengths[-3:]}", flush=True)
         final_audio = fast_overlay(audio_files, processed_audio_segments)
 
         # 4. 导出 & 清理（完全不变）
@@ -348,6 +394,14 @@ async def process_text_file(file_path, voice="zh-CN-XiaoxiaoNeural"):
         print(f"正在保存音频文件至: {output_file}")
         final_audio.export(output_file, format="mp3")
         print(f"音频已成功保存至: {output_file}")
+
+        # 调试：核对实际生成的 MP3 时长
+        actual_dur = ffprobe_duration(output_file)
+        if actual_dur is not None:
+            print(f"  [调试] MP3 实际时长: {actual_dur:.2f} s ({actual_dur/3600:.2f} h)", flush=True)
+            print(f"  [调试] MP3 字节数: {os.path.getsize(output_file)}", flush=True)
+            if actual_dur > 36000:  # > 10h
+                print(f"  [告警] MP3 时长超过 10 小时！", flush=True)
 
         # 清理临时文件
         for fp, _ in audio_files:

@@ -154,6 +154,28 @@ jobs:
         run: |
           ls -R subtitles/
           ls -l
+          echo "===== MP3 时长 ====="
+          ffprobe -v error -show_entries format=duration,bit_rate -of default=noprint_wrappers=1 subtitles/word_level_processed_translated.mp3 || true
+          echo "===== MP3 各流 ====="
+          ffprobe -v error -show_streams subtitles/word_level_processed_translated.mp3 | grep -E 'codec_type|duration|bit_rate' || true
+          echo "===== 翻译文件行数 ====="
+          wc -l subtitles/word_level_processed_translated.txt
+          echo "===== 翻译文件首/末 3 行 ====="
+          head -3 subtitles/word_level_processed_translated.txt
+          echo "..."
+          tail -3 subtitles/word_level_processed_translated.txt
+
+      - name: 上传调试制品（字幕、MP3、最终视频）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: translate-debug-${{ github.run_id }}
+          path: |
+            subtitles/word_level_processed.txt
+            subtitles/word_level_processed_translated.txt
+            subtitles/word_level_processed_translated.mp3
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: 上传视频到B站
         if: github.event.inputs.upload_bilibili == 'true'
@@ -173,6 +195,22 @@ jobs:
               --api_config api_config.json \
               --upload-bilibili
           fi
+          echo "===== 最终视频时长（工作目录内）====="
+          find . -maxdepth 3 -name 'final_video.mp4' -print -exec ffprobe -v error -show_entries format=duration,bit_rate -of default=noprint_wrappers=1 {} \; || true
+          find . -maxdepth 3 -name 'final_video.mp4' -print -exec ffprobe -v error -show_streams {} \; | grep -E 'codec_type|duration|bit_rate' || true
+
+      - name: 上传最终视频到制品
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video-${{ github.run_id }}
+          path: |
+            final_video.mp4
+            /tmp/final_video.mp4
+            /tmp/downloaded_video.mp4
+            /tmp/cover.*
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: 上传视频到Dailymotion
         if: github.event.inputs.upload_dailymotion == 'true'
