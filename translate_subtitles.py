@@ -11,53 +11,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 # 定义系统提示词常量
-SYSTEM_PROMPT = """# Role: 专业翻译官
-## Profile
-- author: LangGPT优化中心
-- version: 2.1
-- language: 中英双语
-- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景
+SYSTEM_PROMPT = """将用户提供的字幕文本翻译成中文。
 
-## Background
-用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整
-
-## Skills
-1. 多语言文本解析与重构能力
-2. 时间戳识别与格式保留技术
-3. 语义通顺度校验算法
-4. 格式控制与冗余内容过滤
-
-## Goals
-1. 实现原文语义的精准转换
-2. 保持时间戳等特殊格式元素
-3. 确保输出结果自然流畅
-4. 排除非翻译内容添加
-
-## Constraints
-1. 禁止添加解释性文字
-2. 禁用注释或说明性符号
-3. 保留原始时间戳格式（如(12:34)或(HH:MM:SS.mmm)）
-4. 不处理非文本元素（如图片/表格）
-5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译
-
-## Workflow
-1. 接收输入内容，检测语言类型
-2. 识别并标记特殊格式元素
-3. 执行语义转换：
-   - 日常用语：采用口语化表达
-   - 技术术语：使用标准化译法
-4. 输出纯翻译结果
-
-## OutputFormat
-仅返回符合以下要求的翻译文本：
-1. 中文书面语表达
-2. 保留原始段落结构
-3. 时间戳保持(MM:SS)或(HH:MM:SS)或(HH:MM:SS.mmm)格式
-4. 无任何附加符号或说明
-5. 尽量只要中文，不要中英文夹杂。
-
-## Initialization
-请提供需要翻译的文本内容，我将严格遵守上述规则进行处理。"""
+要求：
+1. 准确传达原意，译文符合中文表达习惯，通顺自然。
+2. 保持原文的语气风格（如风趣幽默、严肃中立等）。
+3. 只输出翻译后的文本，不添加解释、注释、编号或任何额外内容。
+4. 时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文逐行一致，不得修改、省略、添加或调换顺序。"""
 
 # 线程锁用于保护共享资源
 progress_lock = threading.Lock()
@@ -264,7 +224,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         "model": api_config.get('model_name', 'default'),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f" {text}"}
+            {"role": "user", "content": f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文完全一致：\n\n{text}"}
         ],
         "stream": False,
         "max_tokens": 4000,
@@ -286,13 +246,13 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         data = json.loads(json.dumps(base_data))  # 深拷贝
         if retry_count >= 1 and last_format_err:
             reminder = (
-                '\n\n【重要提醒】上一轮输出存在以下问题，请务必修正：\n'
-                f'- {last_format_err}\n'
-                '- 时间戳必须与原文**逐字相同**（包括每个数字、冒号、点号、毫秒数），不得修改、不得编造、不得调换顺序。\n'
-                '- 行数与原文相同，或在断句合并情况下比原文少 1 行。\n'
-                '- 如果某段时间戳数值看起来很大（例如跨越小时），那是原文的正常情况，保持原样即可，不要『修正』它。'
+                '\n\n【格式要求】上一轮输出存在问题，请重新输出：\n'
+                f'- 问题：{last_format_err}\n'
+                '- 时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文**完全相同**（逐字一致），禁止修改、编造、省略或调换顺序。\n'
+                '- 行数应与原文相同；若因断句合并，可以比原文少 1 行。\n'
+                '- 只输出翻译后的中文文本，不要添加解释、注释或任何额外内容。'
             )
-            data["messages"][1]["content"] = f" {text}{reminder}"
+            data["messages"][1]["content"] = f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文完全一致：\n\n{text}{reminder}"
         return data
 
     for retry_count in range(max_retries):
