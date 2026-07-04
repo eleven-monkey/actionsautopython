@@ -11,13 +11,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 # 定义系统提示词常量
-SYSTEM_PROMPT = """将用户提供的字幕文本翻译成中文。
+SYSTEM_PROMPT = """# Role: 专业字幕翻译官
 
-要求：
-1. 准确传达原意，译文符合中文表达习惯，通顺自然。
-2. 保持原文的语气风格（如风趣幽默、严肃中立等）。
-3. 只输出翻译后的文本，不添加解释、注释、编号或任何额外内容。
-4. 时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文逐行一致，不得修改、省略、添加或调换顺序。"""
+## 任务
+将外文字幕翻译为中文，严格保留每行的格式。
+
+## 格式要求（极其重要）
+每行必须严格保持如下格式，不得改变时间戳：
+(HH:MM:SS.mmm) 中文译文
+
+## 规则
+1. 时间戳 (HH:MM:SS.mmm) 必须原样保留，不得修改数字、格式或符号
+2. 只翻译时间戳之后的正文内容为中文
+3. 每行的时间戳与原文一一对应，不得合并、拆分或调换顺序
+4. 正文尽量纯中文，不要中英文夹杂
+5. 不要添加任何解释性文字、注释或说明
+6. 不要使用 <think> 标签
+"""
 
 # 线程锁用于保护共享资源
 progress_lock = threading.Lock()
@@ -258,13 +268,10 @@ def translate_with_local_llama(text, orig_ts_list=None):
             resp = llm.create_chat_completion(
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": (
-                        f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.mmm)，"
-                        f"且必须与原文完全一致：\n\n{text}"
-                    )},
+                    {"role": "user", "content": text},
                 ],
                 max_tokens=4000,
-                temperature=0.7,
+                temperature=0.3,
                 top_p=0.7,
             )
         content = resp["choices"][0]["message"]["content"]
@@ -317,15 +324,13 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         "model": api_config.get('model_name', 'default'),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文完全一致：\n\n{text}"}
+            {"role": "user", "content": text}
         ],
         "stream": False,
         "max_tokens": 4000,
         "stop": None,
-        "temperature": 0.7,
+        "temperature": 0.3,
         "top_p": 0.7,
-        "top_k": 50,
-        "frequency_penalty": 0.4,
         "n": 1,
         "response_format": {"type": "text"},
     }
@@ -342,11 +347,11 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
             reminder = (
                 '\n\n【格式要求】上一轮输出存在问题，请重新输出：\n'
                 f'- 问题：{last_format_err}\n'
-                '- 时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文**完全相同**（逐字一致），禁止修改、编造、省略或调换顺序。\n'
+                '- 时间戳必须与原文**完全相同**（逐字一致），禁止修改、编造、省略或调换顺序。\n'
                 '- 行数应与原文相同；若因断句合并，可以比原文少 1 行。\n'
                 '- 只输出翻译后的中文文本，不要添加解释、注释或任何额外内容。'
             )
-            data["messages"][1]["content"] = f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文完全一致：\n\n{text}{reminder}"
+            data["messages"][1]["content"] = f"{text}{reminder}"
         return data
 
     for retry_count in range(max_retries):
