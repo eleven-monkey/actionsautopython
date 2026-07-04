@@ -199,9 +199,102 @@ def normalize_translation(text):
     return text
 
 
+# ---- 本地 llama 兜底翻译（tencent/Hy-MT2-1.8B-GGUF）----
+# 仅在 API 翻译失败时启用，作为本地兜底。
+# 依赖安装（CPU 预编译版，节约编译时间）：
+#   pip install llama-cpp-python --no-cache-dir --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#   pip install huggingface_hub
+_LLM = None
+_LLM_LOCK = threading.Lock()           # 保护模型加载（单例）
+_LLM_INFER_LOCK = threading.Lock()     # 保护推理（llama-cpp-python 非线程安全）
+_LLM_MODEL_REPO = "tencent/Hy-MT2-1.8B-GGUF"
+_LLM_MODEL_FILE = "Hy-MT2-1.8B-Q4_K_M.gguf"
+
+
+def _get_local_llm():
+    """懒加载本地 llama-cpp-python 模型（线程安全单例）。加载失败返回 None。"""
+    global _LLM
+    if _LLM is not None:
+        return _LLM
+    with _LLM_LOCK:
+        if _LLM is not None:
+            return _LLM
+        try:
+            from llama_cpp import Llama
+            from huggingface_hub import hf_hub_download
+        except ImportError as e:
+            print(f"[本地LLM] 缺少依赖（{e}），无法启用本地兜底。请安装：\n"
+                  f"  pip install llama-cpp-python --no-cache-dir "
+                  f"--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu\n"
+                  f"  pip install huggingface_hub")
+            return None
+        try:
+            print(f"[本地LLM] 正在下载/加载 {_LLM_MODEL_REPO}/{_LLM_MODEL_FILE} ...")
+            model_path = hf_hub_download(repo_id=_LLM_MODEL_REPO, filename=_LLM_MODEL_FILE)
+            _LLM = Llama(
+                model_path=model_path,
+                n_ctx=4096,
+                n_threads=max(1, (os.cpu_count() or 2) // 2),
+                verbose=False,
+            )
+            print("[本地LLM] 加载完成")
+        except Exception as e:
+            print(f"[本地LLM] 加载失败: {e}")
+            return None
+    return _LLM
+
+
+def translate_with_local_llama(text, orig_ts_list=None):
+    """使用本地 llama 模型翻译段落。成功返回译文文本，失败返回 None。
+
+    会做与 API 相同的格式校验；不通过则尝试一次正则纠错，仍不通过则返回 None。
+    """
+    llm = _get_local_llm()
+    if llm is None:
+        return None
+    try:
+        # llama-cpp-python 的 Llama 实例非线程安全，推理需串行
+        with _LLM_INFER_LOCK:
+            resp = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": (
+                        f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.SSS)，"
+                        f"且必须与原文完全一致：\n\n{text}"
+                    )},
+                ],
+                max_tokens=4000,
+                temperature=0.7,
+                top_p=0.7,
+            )
+        content = resp["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[本地LLM] 翻译出错: {e}")
+        return None
+
+    content = filter_think_tags(content or "")
+    if not content or not contains_chinese(content):
+        return None
+
+    ok, _, _ = is_valid_translation_format(content, orig_ts_list=orig_ts_list)
+    if ok:
+        return content
+    # 尝试一次正则纠错
+    normalized = normalize_translation(content)
+    ok2, _, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
+    if ok2:
+        return normalized
+    return None
+
+
 def translate_text_worker(segment_data, api_config, max_retries=5):
-    """并行翻译工作函数，引入：5 次重试 + 纠错阶段（再请求 1 次让模型自修）+
-    逐行兜底。返回 (idx, translated, original_seg, normalized_flag)。
+    """并行翻译工作函数。翻译流程：
+      1. API 正常 → 走 API
+      2. API 返回 5xx → 立即停止重试 → 本地 llama 兜底
+      3. API 其他错误 → 重试 5 次 → 纠错 + 再试 1 次 → 仍失败则本地 llama 兜底
+      4. 本地兜底也失败 → 逐行原文兜底（保底）
+
+    返回 (idx, translated, original_seg, normalized_flag)。
 
     segment_data 接受 (idx, text) 或 (idx, text, orig_ts_list)。
     """
@@ -240,6 +333,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
     last_translated = None   # 记录最后一次原始返回，用于纠错阶段
     last_normalized = None   # 记录纠错后的文本
     last_format_err = None   # 记录最后一次的格式错误信息，用于重试时反馈给模型
+    hit_5xx = False          # 标记是否因服务端 5xx 错误立即退出重试
 
     def _build_data(retry_count):
         """根据重试次数构造请求数据；后续重试附带更明确的提示。"""
@@ -311,6 +405,16 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
             except Exception:
                 pass
 
+            # 5xx：服务端错误，立即停止重试，直接转本地 llama 兜底
+            if 500 <= response.status_code < 600:
+                print(f"[段落 {segment_index + 1}] 服务端错误 {response.status_code}，"
+                      f"立即停止重试，转本地 llama 兜底")
+                if error_text:
+                    print(f"  响应: {error_text[:300]}")
+                last_format_err = f"HTTP {response.status_code}"
+                hit_5xx = True
+                break
+
             print(f"[段落 {segment_index + 1}] HTTP错误 (尝试次数: {retry_count + 1}/{max_retries})")
             if response.status_code == 502:
                 print(f"网关错误 (502): {error_text}")
@@ -328,61 +432,73 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
             last_format_err = f"其他错误: {e}"
             continue
 
-    # 5 次都失败：进入纠错阶段
-    # 先对最后一次返回纠错
-    if last_translated:
-        normalized = normalize_translation(last_translated)
-        if normalized != last_translated:
-            last_normalized = normalized
-            ok, err, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
-            if ok:
-                with progress_lock:
-                    completed_count += 1
-                print(f"[段落 {segment_index + 1}] 纠错后格式通过（无需再请求）")
-                return segment_index, normalized, text, True
-            print(f"[段落 {segment_index + 1}] 纠错后仍不通过: {err}，再请求 1 次让模型自修")
-        else:
-            print(f"[段落 {segment_index + 1}] 5 次重试后仍未通过且无可纠错项，再请求 1 次")
+    # ---- 纠错阶段（仅非 5xx 退出时执行）----
+    # 5xx 直接跳过纠错，进入本地 llama 兜底
+    if not hit_5xx:
+        # 5 次都失败：先对最后一次返回纠错
+        if last_translated:
+            normalized = normalize_translation(last_translated)
+            if normalized != last_translated:
+                last_normalized = normalized
+                ok, err, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
+                if ok:
+                    with progress_lock:
+                        completed_count += 1
+                    print(f"[段落 {segment_index + 1}] 纠错后格式通过（无需再请求）")
+                    return segment_index, normalized, text, True
+                print(f"[段落 {segment_index + 1}] 纠错后仍不通过: {err}，再请求 1 次让模型自修")
+            else:
+                print(f"[段落 {segment_index + 1}] {max_retries} 次重试后仍未通过且无可纠错项，再请求 1 次")
 
-    # 再请求 1 次，让模型自己修复（同时附带更明确的提示）
-    try:
-        time.sleep(1)
-        data = _build_data(max_retries)  # 附带上 last_format_err
-        response = requests.post(url, json=data, headers=headers, proxies={"http": None, "https": None}, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-        translated = None
+        # 再请求 1 次，让模型自己修复（同时附带更明确的提示）
         try:
-            translated = result['choices'][0]['message']['content']
-        except (KeyError, IndexError, TypeError):
-            pass
-        translated = filter_think_tags(translated or "")
-        last_translated = translated
+            time.sleep(1)
+            data = _build_data(max_retries)  # 附带上 last_format_err
+            response = requests.post(url, json=data, headers=headers, proxies={"http": None, "https": None}, timeout=60)
+            response.raise_for_status()
+            result = response.json()
+            translated = None
+            try:
+                translated = result['choices'][0]['message']['content']
+            except (KeyError, IndexError, TypeError):
+                pass
+            translated = filter_think_tags(translated or "")
+            last_translated = translated
 
-        if translated and contains_chinese(translated):
-            ok, err, _ = is_valid_translation_format(translated, orig_ts_list=orig_ts_list)
-            if ok:
-                with progress_lock:
-                    completed_count += 1
-                print(f"[段落 {segment_index + 1}] 纠错阶段成功（模型自修）")
-                return segment_index, translated, text, True
-            # 再纠错一次
-            normalized = normalize_translation(translated)
-            ok2, _, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
-            if ok2:
-                with progress_lock:
-                    completed_count += 1
-                print(f"[段落 {segment_index + 1}] 纠错阶段成功（正则修复+模型自修）")
-                return segment_index, normalized, text, True
-            last_normalized = normalized
-    except Exception as e:
-        print(f"[段落 {segment_index + 1}] 纠错阶段请求出错: {e}")
+            if translated and contains_chinese(translated):
+                ok, err, _ = is_valid_translation_format(translated, orig_ts_list=orig_ts_list)
+                if ok:
+                    with progress_lock:
+                        completed_count += 1
+                    print(f"[段落 {segment_index + 1}] 纠错阶段成功（模型自修）")
+                    return segment_index, translated, text, True
+                # 再纠错一次
+                normalized = normalize_translation(translated)
+                ok2, _, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
+                if ok2:
+                    with progress_lock:
+                        completed_count += 1
+                    print(f"[段落 {segment_index + 1}] 纠错阶段成功（正则修复+模型自修）")
+                    return segment_index, normalized, text, True
+                last_normalized = normalized
+        except Exception as e:
+            print(f"[段落 {segment_index + 1}] 纠错阶段请求出错: {e}")
 
+    # ---- 本地 llama 兜底 ----
+    print(f"[段落 {segment_index + 1}] 转入本地 llama 兜底翻译")
+    llama_translated = translate_with_local_llama(text, orig_ts_list=orig_ts_list)
+    if llama_translated:
+        with progress_lock:
+            completed_count += 1
+        print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} 本地 llama 兜底成功")
+        return segment_index, llama_translated, text, True
+
+    # ---- 本地兜底也失败：逐行原文兜底（保底）----
     with progress_lock:
         completed_count += 1
-        print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} 达到最大重试次数({max_retries})，翻译失败")
+        print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} 本地 llama 兜底失败，逐行原文兜底")
 
-    # 全部失败：返回最后一次纠错后的文本（让 main() 逐行兜底）
+    # 返回最后一次可用文本，让 main()/merge_segment_results 逐行兜底到原文
     if last_normalized:
         return segment_index, last_normalized, text, True
     return segment_index, last_translated, text, True  # 可能为 None
