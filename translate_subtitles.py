@@ -17,7 +17,7 @@ SYSTEM_PROMPT = """将用户提供的字幕文本翻译成中文。
 1. 准确传达原意，译文符合中文表达习惯，通顺自然。
 2. 保持原文的语气风格（如风趣幽默、严肃中立等）。
 3. 只输出翻译后的文本，不添加解释、注释、编号或任何额外内容。
-4. 时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文逐行一致，不得修改、省略、添加或调换顺序。"""
+4. 时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文逐行一致，不得修改、省略、添加或调换顺序。"""
 
 # 线程锁用于保护共享资源
 progress_lock = threading.Lock()
@@ -259,7 +259,7 @@ def translate_with_local_llama(text, orig_ts_list=None):
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": (
-                        f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.SSS)，"
+                        f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.mmm)，"
                         f"且必须与原文完全一致：\n\n{text}"
                     )},
                 ],
@@ -317,7 +317,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         "model": api_config.get('model_name', 'default'),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文完全一致：\n\n{text}"}
+            {"role": "user", "content": f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文完全一致：\n\n{text}"}
         ],
         "stream": False,
         "max_tokens": 4000,
@@ -342,11 +342,11 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
             reminder = (
                 '\n\n【格式要求】上一轮输出存在问题，请重新输出：\n'
                 f'- 问题：{last_format_err}\n'
-                '- 时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文**完全相同**（逐字一致），禁止修改、编造、省略或调换顺序。\n'
+                '- 时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文**完全相同**（逐字一致），禁止修改、编造、省略或调换顺序。\n'
                 '- 行数应与原文相同；若因断句合并，可以比原文少 1 行。\n'
                 '- 只输出翻译后的中文文本，不要添加解释、注释或任何额外内容。'
             )
-            data["messages"][1]["content"] = f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.SSS)，且必须与原文完全一致：\n\n{text}{reminder}"
+            data["messages"][1]["content"] = f"请翻译以下字幕文本。每行时间戳格式必须为 (HH:MM:SS.mmm)，且必须与原文完全一致：\n\n{text}{reminder}"
         return data
 
     for retry_count in range(max_retries):
