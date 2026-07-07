@@ -205,6 +205,9 @@ def process_vtt_file(vtt_file):
         f.write(processed_content)
     
     print(f"处理后的字幕已保存到: {output_file}")
+    print("\n========== 完整原文字幕 ==========")
+    print(processed_content)
+    print("==================================\n")
     return output_file
 
 def main():

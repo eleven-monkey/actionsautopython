@@ -745,6 +745,9 @@ def main():
     print(f"总耗时: {total_time:.2f} 秒")
     print(f"平均每段耗时: {total_time/len(segments):.2f} 秒")
     print(f"结果已保存到: {output_file}")
+    print("\n========== 完整译文字幕 ==========")
+    print('\n'.join(translated_lines))
+    print("==================================\n")
 
 
 if __name__ == "__main__":
