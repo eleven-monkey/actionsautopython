@@ -533,6 +533,60 @@ def remove_timestamps(text):
     return text_without_timestamps
 
 
+def _ts_to_seconds(ts):
+    """把时间戳字符串转成秒数。
+
+    支持 HH:MM:SS.mmm / MM:SS.mmm / MM:SS 等任意段数。
+    例：'1:23:45.678' -> 5025.678；'00:12.500' -> 12.5
+    """
+    parts = ts.split(':')
+    seconds = 0.0
+    for p in parts:
+        seconds = seconds * 60 + float(p)
+    return seconds
+
+
+def estimate_speaking_rates(lines):
+    """根据每行时间戳与下一行时间戳，估算每行语速（字/分钟）。
+
+    语速 = 本句字数 / (下一句时间戳 - 本句时间戳) * 60。
+    最后一行没有“下一句”，不计语速；无时间戳的行也跳过。
+    字数按去掉时间戳后的非空白字符数计算（中文按字、英文按字母，标点计入）。
+
+    返回新的行列表，在每行末尾追加 '  [语速: X字/分]'。
+    """
+    # 先把每行的时间戳转成秒（无时间戳记为 None）
+    ts_seconds = []
+    for line in lines:
+        ts = _extract_ts(line)
+        if ts:
+            try:
+                ts_seconds.append(_ts_to_seconds(ts))
+            except (ValueError, IndexError):
+                ts_seconds.append(None)
+        else:
+            ts_seconds.append(None)
+
+    out_lines = []
+    n = len(lines)
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        # 字数：去掉时间戳后的非空白字符数
+        text_only = remove_timestamps(line)
+        char_count = len(re.sub(r'\s', '', text_only))
+
+        annotated = False
+        if i < n - 1 and ts_seconds[i] is not None and ts_seconds[i + 1] is not None:
+            duration = ts_seconds[i + 1] - ts_seconds[i]
+            if duration > 0 and char_count > 0:
+                wpm = char_count / duration * 60
+                out_lines.append(f"{line_stripped}  [语速: {wpm:.0f}字/分]")
+                annotated = True
+        if not annotated:
+            out_lines.append(line_stripped)
+    return out_lines
+
+
 def clean_translation_content(content):
     """清理翻译内容中的多余字符（只清理字符和行内空白，不合并换行）。
 
@@ -746,7 +800,8 @@ def main():
     print(f"平均每段耗时: {total_time/len(segments):.2f} 秒")
     print(f"结果已保存到: {output_file}")
     print("\n========== 完整译文字幕 ==========")
-    print('\n'.join(translated_lines))
+    rate_lines = estimate_speaking_rates(translated_lines)
+    print('\n'.join(rate_lines))
     print("==================================\n")
 
 
