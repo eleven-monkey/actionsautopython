@@ -11,6 +11,38 @@ DEBUG = True          # 打开详细调试输出
 SENTENCE_END = ".!?"    # 只以句号结尾分句（按需求）。如需 ?! 一起分句，可改为 ".!?"
 # =============================
 
+# ---- 缩写识别：末尾句点不应触发断句 ----
+# 1) 首字母缩写型：U.S.A. / L.I. / U.S. / A.B.C.（单大写字母+句点重复，整词无小写字母）
+_INITIALS_RE = re.compile(r'^[A-Z]\.([A-Z]\.)*$')
+
+# 2) 常见缩写词（小写形式，含句点）
+_ABBREV_SET = {
+    # 称谓
+    'mr.', 'mrs.', 'ms.', 'dr.', 'prof.', 'sr.', 'jr.', 'st.',
+    # 常见拉丁/英文缩写
+    'vs.', 'etc.', 'e.g.', 'i.e.', 'inc.', 'ltd.', 'co.', 'no.',
+    'corp.', 'bros.', 'fig.', 'vol.', 'pp.', 'ed.', 'rev.', 'al.',
+    'approx.', 'dept.', 'est.', 'ph.d.', 'b.a.', 'm.a.',
+    # 月份
+    'jan.', 'feb.', 'mar.', 'apr.', 'jun.', 'jul.', 'aug.',
+    'sept.', 'oct.', 'nov.', 'dec.',
+    # 时间
+    'a.m.', 'p.m.',
+}
+
+
+def _is_abbreviation(word: str) -> bool:
+    """判断 word 末尾的句点是否属于缩写（不应触发断句）。"""
+    w = word.strip()
+    if not w:
+        return False
+    if _INITIALS_RE.match(w):        # L.I. / U.S.A. / U.S.
+        return True
+    if w.lower() in _ABBREV_SET:     # Mr. / Dr. / e.g. / a.m.
+        return True
+    return False
+
+
 # 正则：cue 头（起止时间）
 CUE_HEADER_RE = re.compile(
     r'^(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})'
@@ -107,8 +139,10 @@ def vtt_to_sentences(vtt_text: str, debug: bool = False) -> str:
             num_words += 1
 
             # 句子结束判定（句号、问号、叹号）
+            # 缩写词末尾的句点（如 L.I. / U.S.A. / Mr. / Dr. / e.g.）不触发断句
             if SENTENCE_END and word.strip().endswith(tuple(SENTENCE_END)):
-                flush_sentence()
+                if not _is_abbreviation(word):
+                    flush_sentence()
 
     # 文件结束，收尾
     flush_sentence()
