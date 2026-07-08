@@ -583,9 +583,11 @@ def merge_fast_speaking_lines(lines, max_wpm=MAX_SPEAKING_WPM):
     无时间戳的行无法计算语速，自然跳过。
     每次合并让总行数减 1，因此循环必然终止。
 
-    返回合并后的新行列表（不修改原列表）。
+    返回 (合并后的新行列表, 合并标记列表)，均不修改原列表。
+    合并标记列表与结果行一一对应，True 表示该行由合并产生。
     """
     lines = list(lines)
+    is_merged = [False] * len(lines)
     merge_count = 0
     skipped = set()
 
@@ -645,24 +647,31 @@ def merge_fast_speaking_lines(lines, max_wpm=MAX_SPEAKING_WPM):
         if merge_dir == 'left':
             lines[target - 1] = _merge_two_lines(lines[target - 1], lines[target])
             del lines[target]
+            del is_merged[target]
+            is_merged[target - 1] = True
         else:
             lines[target] = _merge_two_lines(lines[target], lines[target + 1])
             del lines[target + 1]
+            del is_merged[target + 1]
+            is_merged[target] = True
         merge_count += 1
 
     if merge_count > 0:
         print(f"[语速优化] 合并了 {merge_count} 个语速过快的行（阈值 {max_wpm} 字/分）")
-    return lines
+    return lines, is_merged
 
 
-def estimate_speaking_rates(lines):
+def estimate_speaking_rates(lines, merged_flags=None):
     """根据每行时间戳与下一行时间戳，估算每行语速（字/分钟）。
 
     语速 = 本句字数 / (下一句时间戳 - 本句时间戳) * 60。
     最后一行没有“下一句”，不计语速；无时间戳的行也跳过。
     字数按去掉时间戳后的非空白字符数计算（中文按字、英文按字母，标点计入）。
 
-    返回新的行列表，在每行末尾追加 '  [语速: X字/分]'。
+    若传入 merged_flags（与 lines 等长的布尔列表），对标记为合并产生的行
+    追加 '已合并' 标注，与语速一起显示在行末 '[...]' 中。
+
+    返回新的行列表，在每行末尾追加 '  [语速: X字/分]' 等标注。
     """
     # 先把每行的时间戳转成秒（无时间戳记为 None）
     ts_seconds = []
@@ -684,14 +693,18 @@ def estimate_speaking_rates(lines):
         text_only = remove_timestamps(line)
         char_count = len(re.sub(r'\s', '', text_only))
 
-        annotated = False
+        merged = bool(merged_flags[i]) if merged_flags else False
+        tags = []
         if i < n - 1 and ts_seconds[i] is not None and ts_seconds[i + 1] is not None:
             duration = ts_seconds[i + 1] - ts_seconds[i]
             if duration > 0 and char_count > 0:
                 wpm = char_count / duration * 60
-                out_lines.append(f"{line_stripped}  [语速: {wpm:.0f}字/分]")
-                annotated = True
-        if not annotated:
+                tags.append(f"语速: {wpm:.0f}字/分")
+        if merged:
+            tags.append("已合并")
+        if tags:
+            out_lines.append(f"{line_stripped}  [{' | '.join(tags)}]")
+        else:
             out_lines.append(line_stripped)
     return out_lines
 
@@ -897,7 +910,7 @@ def main():
 
     # 合并语速过快的行（固定阈值 440 字/分，默认开启）
     original_line_count = len(translated_lines)
-    translated_lines = merge_fast_speaking_lines(translated_lines)
+    translated_lines, merged_flags = merge_fast_speaking_lines(translated_lines)
     merged_line_count = original_line_count - len(translated_lines)
 
     # 保存翻译结果
@@ -916,7 +929,7 @@ def main():
     print(f"平均每段耗时: {total_time/len(segments):.2f} 秒")
     print(f"结果已保存到: {output_file}")
     print("\n========== 完整译文字幕 ==========")
-    rate_lines = estimate_speaking_rates(translated_lines)
+    rate_lines = estimate_speaking_rates(translated_lines, merged_flags)
     print('\n'.join(rate_lines))
     print("==================================\n")
 
