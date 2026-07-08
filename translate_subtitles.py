@@ -546,6 +546,115 @@ def _ts_to_seconds(ts):
     return seconds
 
 
+MAX_SPEAKING_WPM = 440  # 语速阈值（字/分钟），超过则与相邻较慢行合并
+
+
+def _merge_two_lines(line_a, line_b):
+    """合并两行：保留 line_a 的时间戳，拼接两行文本。
+
+    line_a 是时间戳较早的行（吸收者），line_b 是被吸收的行。
+    返回合并后的单行，格式 '(ts) textA textB'。
+    """
+    ts_a = _extract_ts(line_a)
+    text_a = _extract_text_after_ts(line_a)
+    if not text_a:
+        text_a = remove_timestamps(line_a).strip()
+    text_b = _extract_text_after_ts(line_b)
+    if not text_b:
+        text_b = remove_timestamps(line_b).strip()
+    merged_text = f"{text_a} {text_b}".strip()
+    if ts_a:
+        return f"({ts_a}) {merged_text}"
+    return merged_text
+
+
+def merge_fast_speaking_lines(lines, max_wpm=MAX_SPEAKING_WPM):
+    """合并语速超过 max_wpm 的行，与相邻语速较慢者合并以降速。
+
+    策略：
+    - 逐行计算语速 = 字数 / (下一行时间戳 - 本行时间戳) * 60
+    - 找到第一行超阈值的行 i，检查其左右邻居的语速
+    - 选邻居中语速较慢（且比自己慢）的方向合并：
+        - 合并左邻居：i 吸收进 i-1，保留 i-1 的时间戳
+        - 合并右邻居：i 吸收 i+1，保留 i 的时间戳
+    - 合并后重新计算所有行语速（因为时长结构变了），重复
+    - 若某行超阈值但两邻居都不比自己慢，标记跳过，继续找下一个
+
+    无时间戳的行无法计算语速，自然跳过。
+    每次合并让总行数减 1，因此循环必然终止。
+
+    返回合并后的新行列表（不修改原列表）。
+    """
+    lines = list(lines)
+    merge_count = 0
+    skipped = set()
+
+    while True:
+        n = len(lines)
+        # 解析每行的时间戳（秒）和字数
+        ts_secs = []
+        chars = []
+        for line in lines:
+            ts = _extract_ts(line)
+            ts_sec = None
+            if ts:
+                try:
+                    ts_sec = _ts_to_seconds(ts)
+                except (ValueError, IndexError):
+                    ts_sec = None
+            ts_secs.append(ts_sec)
+            text_only = remove_timestamps(line)
+            chars.append(len(re.sub(r'\s', '', text_only)))
+
+        # 计算每行语速（最后一行无下一行，不计）
+        wpms = [None] * n
+        for i in range(n - 1):
+            if ts_secs[i] is not None and ts_secs[i + 1] is not None:
+                dur = ts_secs[i + 1] - ts_secs[i]
+                if dur > 0 and chars[i] > 0:
+                    wpms[i] = chars[i] / dur * 60
+
+        # 找第一个可处理的超阈值行
+        target = None
+        merge_dir = None
+        for i in range(n):
+            if i in skipped or wpms[i] is None or wpms[i] <= max_wpm:
+                continue
+            left_wpm = wpms[i - 1] if i > 0 else None
+            right_wpm = wpms[i + 1] if i < n - 1 else None
+            # 在比自己慢的邻居中选最慢的
+            best = None
+            if left_wpm is not None and left_wpm < wpms[i]:
+                best = ('left', left_wpm)
+            if right_wpm is not None and right_wpm < wpms[i]:
+                if best is None or right_wpm < best[1]:
+                    best = ('right', right_wpm)
+            if best is not None:
+                target = i
+                merge_dir = best[0]
+                break
+            else:
+                # 两邻居都不比自己慢，合并无法降速，跳过
+                skipped.add(i)
+
+        if target is None:
+            break
+
+        # 执行合并，行号变化后重新评估所有行
+        skipped.clear()
+        if merge_dir == 'left':
+            lines[target - 1] = _merge_two_lines(lines[target - 1], lines[target])
+            del lines[target]
+        else:
+            lines[target] = _merge_two_lines(lines[target], lines[target + 1])
+            del lines[target + 1]
+        merge_count += 1
+
+    if merge_count > 0:
+        print(f"[语速优化] 合并了 {merge_count} 个语速过快的行（阈值 {max_wpm} 字/分）")
+    return lines
+
+
 def estimate_speaking_rates(lines):
     """根据每行时间戳与下一行时间戳，估算每行语速（字/分钟）。
 
@@ -786,6 +895,11 @@ def main():
         total_fallback_lines += fb
         translated_lines.extend(out_lines)
 
+    # 合并语速过快的行（固定阈值 440 字/分，默认开启）
+    original_line_count = len(translated_lines)
+    translated_lines = merge_fast_speaking_lines(translated_lines)
+    merged_line_count = original_line_count - len(translated_lines)
+
     # 保存翻译结果
     output_file = os.path.splitext(input_file)[0] + '_translated.txt'
     save_translation(translated_lines, output_file, keep_timestamps=args.keep_timestamps)
@@ -795,6 +909,8 @@ def main():
     print(f"成功翻译: {len(segments) - failed_count} 个段落")
     print(f"失败段落: {failed_count} 个")
     print(f"兜底行数: {total_fallback_lines}")
+    if merged_line_count > 0:
+        print(f"语速合并: {original_line_count} 行 → {len(translated_lines)} 行（合并 {merged_line_count} 行）")
     print(f"并行工作线程: {args.max_workers} 个")
     print(f"总耗时: {total_time:.2f} 秒")
     print(f"平均每段耗时: {total_time/len(segments):.2f} 秒")
