@@ -275,7 +275,10 @@ jobs:
           UPLOAD_DAILYMOTION: ${{ env.UPLOAD_DAILYMOTION }}
         run: |
           python -m pip install --upgrade pip
-          pip install requests pillow bilibili-api-python aiohttp
+          # 即使 --skip-prepare，youtube_to_bilibili.py 顶部也会强制 import
+          # yt_dlp / PIL / bilibili_api，缺一个就 sys.exit(1)。
+          # 因此这三个必须无条件安装。
+          pip install yt-dlp pillow requests bilibili-api-python aiohttp
           if [ "${UPLOAD_DAILYMOTION}" == "true" ]; then
             pip install dailymotion
           fi
