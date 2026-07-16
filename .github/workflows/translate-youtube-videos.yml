@@ -243,7 +243,7 @@ jobs:
             output/final_video.mp4
             output/cover.jpeg
             output/upload_config.pkl
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: error
 
   # ================================================================
@@ -324,12 +324,6 @@ jobs:
             --skip-prepare \
             --upload-dailymotion
 
-      # 上传成功后清理 artifact（避免 mp4 长期占用存储）
-      # 条件：upload job 整体成功 = 用户勾选的上传目标全部成功
-      # continue-on-error: 即使删除本身失败也不影响整体 workflow 状态
-      - name: 清理 artifact（上传成功后）
-        if: success()
-        continue-on-error: true
-        uses: actions/delete-artifact@v4
-        with:
-          name: ${{ needs.prepare.outputs.artifact_name }}
+      # 注：GitHub 官方没有 actions/delete-artifact，
+      # 公共仓库的 artifact 需依赖 retention-days 自动过期（已设为 3 天）。
+      # 要想立即清理，需在 UI 手动 Actions → Artifacts → Delete。
