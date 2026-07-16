@@ -992,6 +992,9 @@ def main():
     # --- 准备目录 ---
     os.makedirs(args.work_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
+    # 关键：转绝对路径，避免后续 chdir 到 work_dir 后，
+    # 相对路径 'output/xxx' 被解析到 /tmp/output/ 这种错误位置
+    args.output_dir = os.path.abspath(args.output_dir)
     # prepare 阶段的中间文件全部在 work_dir；最终产物复制到 output_dir
 
     # prepare 阶段的中间文件路径
