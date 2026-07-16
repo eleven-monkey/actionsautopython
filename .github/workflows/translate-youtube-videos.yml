@@ -1,5 +1,10 @@
 name: 翻译YouTube字幕并上传到B站
 
+# 设计要点：
+# 1. 拆成 2 个 job：prepare / upload
+# 2. prepare 产出 artifact；upload 通过 download-artifact 复用产物
+# 3. B 站上传失败时只需 Re-run jobs -> upload 即可单独重试，不必重跑 prepare
+
 on:
   workflow_dispatch:
     inputs:
@@ -59,34 +64,52 @@ on:
         type: boolean
 
 jobs:
-  translate_and_upload:
+  # ================================================================
+  # 1) 准备阶段：字幕下载/翻译/TTS/视频合成/封面
+  #    产出 upload-artifact (final_video.mp4 + cover.jpeg + upload_config.pkl)
+  # ================================================================
+  prepare:
+    name: 字幕 + 视频 + 封面 准备
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.set.outputs.artifact_name }}
     defaults:
       run:
         working-directory: .
     steps:
+      - name: 归一化输入参数
+        run: |
+          {
+            echo "YT_URL=${{ github.event.inputs.youtube_url }}"
+            echo "API_CONFIG_NAME=${{ github.event.inputs.api_config_name }}"
+            echo "SEGMENT_SIZE=${{ github.event.inputs.segment_size }}"
+            echo "MAX_WORKERS=${{ github.event.inputs.max_workers }}"
+            echo "KEEP_TIMESTAMPS=${{ github.event.inputs.keep_timestamps }}"
+            echo "USE_COOKIES=${{ github.event.inputs.use_cookies }}"
+            echo "VOICE_NAME=${{ github.event.inputs.voice_name }}"
+            echo "UPLOAD_BILIBILI=${{ github.event.inputs.upload_bilibili }}"
+            echo "UPLOAD_DAILYMOTION=${{ github.event.inputs.upload_dailymotion }}"
+          } >> "$GITHUB_ENV"
+
       - name: 检出代码
         uses: actions/checkout@v4
-        
+
       - name: Install Deno
         run: |
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
-          # Also link to global path as backup
           sudo ln -sf $HOME/.deno/bin/deno /usr/local/bin/deno
-          
+
       - name: Check Deno version
         run: |
           deno --version
           which deno
-
 
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install https://github.com/yt-dlp/yt-dlp/archive/master.zip
           pip install requests edge-tts pydub numpy pillow bilibili-api-python aiohttp
-          # 本地 llama 兜底翻译依赖（CPU 预编译版，节约编译时间）
           pip install huggingface_hub
           pip install llama-cpp-python --no-cache-dir --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
@@ -100,109 +123,213 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          
+
       - name: 创建字幕目录
         run: mkdir -p subtitles
-        
+
       - name: 创建cookies文件（如果启用）
-        if: github.event.inputs.use_cookies == 'true'
+        if: env.USE_COOKIES == 'true'
+        env:
+          COOKIES_SECRET: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
-          echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
+          echo "${COOKIES_SECRET}" > youtube_cookies.txt
           echo "cookies文件已创建"
-          
-      - name: 创建API配置文件
+
+      - name: 写入API配置
+        env:
+          API_NAME: ${{ env.API_CONFIG_NAME }}
         run: |
-          cat > api_config.json << EOF
+          cat > api_config.json <<EOF
           {
-            "url": "${{ secrets[format('API_URL_{0}', github.event.inputs.api_config_name)] }}",
-            "api_key": "${{ secrets[format('API_KEY_{0}', github.event.inputs.api_config_name)] }}",
-            "model_name": "${{ secrets[format('API_MODEL_{0}', github.event.inputs.api_config_name)] }}"
+            "url": "${{ secrets[format('API_URL_{0}', env.API_NAME)] }}",
+            "api_key": "${{ secrets[format('API_KEY_{0}', env.API_NAME)] }}",
+            "model_name": "${{ secrets[format('API_MODEL_{0}', env.API_NAME)] }}"
           }
           EOF
-          
+          echo "api_config.json 内容："
+          cat api_config.json
+
       - name: 下载YouTube字幕
+        env:
+          YT_URL: ${{ env.YT_URL }}
+          USE_COOKIES: ${{ env.USE_COOKIES }}
         run: |
-          # 设置遇到错误立即退出，避免后续命令执行
           set -e
           echo "===== 开始下载YouTube字幕 ====="
-          echo "YouTube URL: ${{ github.event.inputs.youtube_url }}"
-          echo "是否使用Cookies: ${{ github.event.inputs.use_cookies }}"
-
-          if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
-            echo "检测到使用Cookies，开始下载..."
-            python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}" --cookies youtube_cookies.txt
+          echo "YouTube URL: ${YT_URL}"
+          echo "是否使用Cookies: ${USE_COOKIES}"
+          if [ "${USE_COOKIES}" == "true" ]; then
+            python download_subtitles.py --url "${YT_URL}" --cookies youtube_cookies.txt
           else
-            echo "不使用Cookies，开始下载..."
-            python download_subtitles.py --url "${{ github.event.inputs.youtube_url }}"
+            python download_subtitles.py --url "${YT_URL}"
           fi
-
           echo "===== 字幕下载步骤成功完成 ====="
-          
+
       - name: 翻译字幕（保留时间戳）
-        if: github.event.inputs.keep_timestamps == 'true'
+        if: env.KEEP_TIMESTAMPS == 'true'
+        env:
+          SEGMENT_SIZE: ${{ env.SEGMENT_SIZE }}
+          MAX_WORKERS: ${{ env.MAX_WORKERS }}
         run: |
           python translate_subtitles.py \
             --api_config_file api_config.json \
-            --segment_size "${{ github.event.inputs.segment_size }}" \
+            --segment_size "${SEGMENT_SIZE}" \
             --keep_timestamps \
-            --max_workers "${{ github.event.inputs.max_workers }}"
-            
+            --max_workers "${MAX_WORKERS}"
+
       - name: 翻译字幕（不保留时间戳）
-        if: github.event.inputs.keep_timestamps != 'true'
+        if: env.KEEP_TIMESTAMPS != 'true'
+        env:
+          SEGMENT_SIZE: ${{ env.SEGMENT_SIZE }}
+          MAX_WORKERS: ${{ env.MAX_WORKERS }}
         run: |
           python translate_subtitles.py \
             --api_config_file api_config.json \
-            --segment_size "${{ github.event.inputs.segment_size }}" \
-            --max_workers "${{ github.event.inputs.max_workers }}"
+            --segment_size "${SEGMENT_SIZE}" \
+            --max_workers "${MAX_WORKERS}"
 
       - name: 生成语音
+        env:
+          VOICE_NAME: ${{ env.VOICE_NAME }}
         run: |
-          python tts.py --filepath 'subtitles/word_level_processed_translated.txt' --char "${{ github.event.inputs.voice_name }}"
-          
+          python tts.py --filepath 'subtitles/word_level_processed_translated.txt' --char "${VOICE_NAME}"
+
       - name: Debug - List Files
         run: |
           ls -R subtitles/
           ls -l
 
-      - name: 上传视频到B站
-        if: github.event.inputs.upload_bilibili == 'true'
+      # prepare 阶段：仅产出 final_video.mp4 / cover.jpeg / upload_config.pkl
+      - name: 准备视频+封面+上传配置 (仅 prepare，跳过上传)
+        env:
+          YT_URL: ${{ env.YT_URL }}
+          USE_COOKIES: ${{ env.USE_COOKIES }}
+        run: |
+          if [ "${USE_COOKIES}" == "true" ]; then
+            python youtube_to_bilibili.py \
+              --url "${YT_URL}" \
+              --api_config api_config.json \
+              --cookies youtube_cookies.txt \
+              --output_dir ./output \
+              --skip-upload
+          else
+            python youtube_to_bilibili.py \
+              --url "${YT_URL}" \
+              --api_config api_config.json \
+              --output_dir ./output \
+              --skip-upload
+          fi
+
+      - name: 校验产物
+        run: |
+          ls -lh output/
+          for f in final_video.mp4 cover.jpeg upload_config.pkl; do
+            if [ ! -s "output/$f" ]; then
+              echo "错误: 产物 output/$f 缺失或为空"
+              exit 1
+            fi
+          done
+          echo "产物校验通过"
+
+      - name: 设置 artifact 名
+        id: set
+        run: echo "artifact_name=upload-artifact-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: 上传产物 artifact (供 upload job 使用)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set.outputs.artifact_name }}
+          path: |
+            output/final_video.mp4
+            output/cover.jpeg
+            output/upload_config.pkl
+          retention-days: 7
+          if-no-files-found: error
+
+  # ================================================================
+  # 2) 上传阶段：根据输入参数决定上传到 B 站 / Dailymotion
+  #    失败时只需 Re-run jobs -> upload 即可单独重试
+  # ================================================================
+  upload:
+    name: 上传视频
+    needs: [prepare]
+    if: success()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: 归一化输入
+        run: |
+          {
+            echo "UPLOAD_BILIBILI=${{ github.event.inputs.upload_bilibili }}"
+            echo "UPLOAD_DAILYMOTION=${{ github.event.inputs.upload_dailymotion }}"
+          } >> "$GITHUB_ENV"
+
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        env:
+          UPLOAD_BILIBILI: ${{ env.UPLOAD_BILIBILI }}
+          UPLOAD_DAILYMOTION: ${{ env.UPLOAD_DAILYMOTION }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pillow bilibili-api-python aiohttp
+          if [ "${UPLOAD_DAILYMOTION}" == "true" ]; then
+            pip install dailymotion
+          fi
+
+      - name: 下载 prepare 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}
+          path: ./output
+
+      - name: 校验产物
+        run: |
+          ls -lh output/
+          for f in final_video.mp4 cover.jpeg upload_config.pkl; do
+            if [ ! -s "output/$f" ]; then
+              echo "错误: 产物 output/$f 缺失或为空"
+              exit 1
+            fi
+          done
+
+      # upload 阶段不需要 --api_config（已经在 prepare 阶段用过）
+      # 根据输入参数决定要跑哪些上传目标
+      - name: 上传到 B 站
+        if: env.UPLOAD_BILIBILI == 'true'
         env:
           BILIBILI_SESSDATA: ${{ secrets.BILIBILI_SESSDATA }}
           BILIBILI_JCT: ${{ secrets.BILIBILI_JCT }}
         run: |
-          if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
-            python youtube_to_bilibili.py \
-              --url "${{ github.event.inputs.youtube_url }}" \
-              --api_config api_config.json \
-              --cookies youtube_cookies.txt \
-              --upload-bilibili
-          else
-            python youtube_to_bilibili.py \
-              --url "${{ github.event.inputs.youtube_url }}" \
-              --api_config api_config.json \
-              --upload-bilibili
-          fi
+          python youtube_to_bilibili.py \
+            --url "placeholder" \
+            --output_dir ./output \
+            --skip-prepare \
+            --upload-bilibili
 
-      - name: 上传视频到Dailymotion
-        if: github.event.inputs.upload_dailymotion == 'true'
+      - name: 上传到 Dailymotion
+        if: env.UPLOAD_DAILYMOTION == 'true'
         env:
-          BILIBILI_SESSDATA: ${{ secrets.BILIBILI_SESSDATA }}
-          BILIBILI_JCT: ${{ secrets.BILIBILI_JCT }}
           DM_API_KEY: ${{ secrets.DM_API_KEY }}
           DM_API_SECRET: ${{ secrets.DM_API_SECRET }}
           DM_USERNAME: ${{ secrets.DM_USERNAME }}
           DM_PASSWORD: ${{ secrets.DM_PASSWORD }}
         run: |
-          pip install dailymotion
-          if [ "${{ github.event.inputs.use_cookies }}" == "true" ]; then
-            python youtube_to_bilibili.py \
-              --url "${{ github.event.inputs.youtube_url }}" \
-              --api_config api_config.json \
-              --cookies youtube_cookies.txt \
-              --upload-dailymotion
-          else
-            python youtube_to_bilibili.py \
-              --url "${{ github.event.inputs.youtube_url }}" \
-              --api_config api_config.json \
-              --upload-dailymotion
-          fi
+          python youtube_to_bilibili.py \
+            --url "placeholder" \
+            --output_dir ./output \
+            --skip-prepare \
+            --upload-dailymotion
+
+      # 上传成功后清理 artifact（避免 mp4 长期占用存储）
+      # 条件：upload job 整体成功 = 用户勾选的上传目标全部成功
+      # continue-on-error: 即使删除本身失败也不影响整体 workflow 状态
+      - name: 清理 artifact（上传成功后）
+        if: success()
+        continue-on-error: true
+        uses: actions/delete-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}

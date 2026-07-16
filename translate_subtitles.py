@@ -231,6 +231,17 @@ _LLM_MODEL_REPO = "tencent/Hy-MT2-1.8B-GGUF"
 _LLM_MODEL_FILE = "Hy-MT2-1.8B-Q4_K_M.gguf"
 
 
+def _compute_retry_delay(retry_count: int, is_5xx: bool = False) -> float:
+    """计算第 retry_count 次重试前的退避秒数（指数退避 + 抖动）。
+
+    5xx 用更长 base（3s），给服务端恢复时间；其他错误用 1s。
+    例（5xx）：retry_count=1→3s, 2→6s, 3→12s, 4→24s, 5→48s（+ 0~0.5s 抖动）
+    例（其他）：retry_count=1→1s, 2→2s, 3→4s, 4→8s, 5→16s（+ 0~0.5s 抖动）
+    """
+    base = 3 if is_5xx else 1
+    return base * (2 ** (retry_count - 1)) + (random() * 0.5)
+
+
 def _get_local_llm():
     """懒加载本地 llama-cpp-python 模型（线程安全单例）。加载失败返回 None。"""
     global _LLM
@@ -348,7 +359,7 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
     last_translated = None   # 记录最后一次原始返回，用于纠错阶段
     last_normalized = None   # 记录纠错后的文本
     last_format_err = None   # 记录最后一次的格式错误信息，用于重试时反馈给模型
-    hit_5xx = False          # 标记是否因服务端 5xx 错误立即退出重试
+    last_was_5xx = False     # 上一轮是否 5xx，决定下次重试的退避 base（3s vs 1s）
 
     def _build_data(retry_count):
         """根据重试次数构造请求数据；后续重试附带更明确的提示。"""
@@ -365,10 +376,12 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
         return data
 
     for retry_count in range(max_retries):
+        # 退避：非首次时根据上一轮错误类型选 base（5xx→3s，其他→1s）
+        if retry_count > 0:
+            time.sleep(_compute_retry_delay(retry_count, is_5xx=last_was_5xx))
+        last_was_5xx = False
+
         try:
-            if retry_count > 0:
-                delay = 1 * (2 ** (retry_count - 1)) + (random() * 0.5)
-                time.sleep(delay)
 
             data = _build_data(retry_count)
             response = requests.post(url, json=data, headers=headers, proxies={"http": None, "https": None})
@@ -420,15 +433,15 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
             except Exception:
                 pass
 
-            # 5xx：服务端错误，立即停止重试，直接转本地 llama 兜底
+            # 5xx：服务端错误，继续重试（用更长退避），不立即转 llama
             if 500 <= response.status_code < 600:
                 print(f"[段落 {segment_index + 1}] 服务端错误 {response.status_code}，"
-                      f"立即停止重试，转本地 llama 兜底")
+                      f"将在下轮用更长退避重试 (尝试次数: {retry_count + 1}/{max_retries})")
                 if error_text:
                     print(f"  响应: {error_text[:300]}")
                 last_format_err = f"HTTP {response.status_code}"
-                hit_5xx = True
-                break
+                last_was_5xx = True
+                continue
 
             print(f"[段落 {segment_index + 1}] HTTP错误 (尝试次数: {retry_count + 1}/{max_retries})")
             if response.status_code == 502:
@@ -447,9 +460,9 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
             last_format_err = f"其他错误: {e}"
             continue
 
-    # ---- 纠错阶段（仅非 5xx 退出时执行）----
-    # 5xx 直接跳过纠错，进入本地 llama 兜底
-    if not hit_5xx:
+    # ---- 纠错阶段（仅当有可纠错内容时执行）----
+    # 5xx 一直持续就没有 last_translated，自然不该走纠错
+    if last_translated:
         # 5 次都失败：先对最后一次返回纠错
         if last_translated:
             normalized = normalize_translation(last_translated)
