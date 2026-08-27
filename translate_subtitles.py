@@ -330,6 +330,8 @@ def translate_with_gemini_api(segment_index, text, api_config, orig_ts_list=None
 
     返回 (idx, translated, original_seg, normalized_flag)。
     """
+    global completed_count, total_count
+
     api_key = api_config.get('api_key', '')
     model_name = api_config.get('model_name', 'gemini-2.0-flash')
     if not api_key:
