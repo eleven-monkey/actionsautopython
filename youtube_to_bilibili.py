@@ -156,6 +156,52 @@ def _call_local_llm_simple(text: str, system_prompt: str, max_tokens: int = 256)
     return content.strip() if content else None
 
 
+def _call_ai_gemini_simple(text: str, system_prompt: str, api_config: Dict[str, Any],
+                           max_tokens: int = 128, max_retries: int = 5) -> Optional[str]:
+    """使用 Google Gemini API 生成短文本（标题/标签）。成功返回清洗后的文本，失败返回 None。
+
+    仅用于非字幕时间戳格式的短文本场景（标题翻译 / 标签生成）。
+    """
+    api_key = (api_config.get('api_key')
+               or os.environ.get('AI_API_KEY')
+               or os.environ.get('AI_KEY') or '')
+    model_name = (api_config.get('model_name')
+                  or os.environ.get('AI_MODEL') or 'gemini-2.0-flash')
+    if not api_key:
+        print("[Gemini] 未配置 api_key，无法调用")
+        return None
+
+    try:
+        from google import genai
+    except ImportError as e:
+        print(f"[Gemini] 缺少依赖 google-genai（{e}），无法调用。请运行: pip install google-genai")
+        return None
+
+    client = genai.Client(api_key=api_key)
+    for retry_count in range(max_retries):
+        if retry_count > 0:
+            time.sleep(_compute_retry_delay(retry_count))
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=text,
+                config={
+                    "system_instruction": system_prompt,
+                    "max_output_tokens": max_tokens,
+                    "temperature": 0.3,
+                    "top_p": 0.7,
+                },
+            )
+            content = getattr(response, 'text', '') or ''
+            content = filter_think_tags(content).strip()
+            if content:
+                return content
+            print(f"[Gemini] 返回内容为空 (尝试次数: {retry_count + 1}/{max_retries})")
+        except Exception as e:
+            print(f"[Gemini] 生成请求错误 (尝试次数: {retry_count + 1}/{max_retries}): {e}")
+    return None
+
+
 def _compute_retry_delay(retry_count: int, is_5xx: bool = False) -> float:
     """计算第 retry_count 次重试前的退避秒数（指数退避 + 抖动）。
 
@@ -392,6 +438,24 @@ def generate_tags_by_ai(title: str, api_config: Dict[str, Any]) -> str:
 3. 标签要与视频内容相关
 """
 
+    # ---- Gemini 分支 ----
+    if api_config.get('type') == 'gemini':
+        gemini_tags = _call_ai_gemini_simple(title, system_prompt, api_config, max_tokens=128)
+        if gemini_tags:
+            tag_list = [t.strip() for t in gemini_tags.split(',') if t.strip()]
+            if tag_list:
+                print(f"生成标签 [Gemini] 成功: {gemini_tags}")
+                return gemini_tags
+        # Gemini 失败 → 本地 llama 兜底
+        llama_tags = _call_local_llm_simple(title, TAGS_SYSTEM_PROMPT, max_tokens=128)
+        if llama_tags:
+            tag_list = [t.strip() for t in llama_tags.split(',') if t.strip()]
+            if tag_list:
+                print(f"生成标签本地 llama 兜底成功: {llama_tags}")
+                return llama_tags
+        print(f"生成标签 [Gemini] 完全失败（API + llama 均不可用），使用默认标签 {DEFAULT_TAGS!r}")
+        return DEFAULT_TAGS
+
     if not api_url or not api_key:
         print("警告: AI api_url 或 api_key 未配置（api_config 或 环境变量），将返回默认标签")
         return DEFAULT_TAGS
@@ -557,7 +621,25 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
     }
 
     translated_title = None
-    if not api_url or not api_key:
+
+    # ---- Gemini 分支 ----
+    if api_config.get('type') == 'gemini':
+        MAX_TITLE_LEN = 100
+        gemini_title = _call_ai_gemini_simple(title, system_prompt, api_config, max_tokens=128)
+        if gemini_title and contains_chinese(gemini_title) and len(gemini_title) <= MAX_TITLE_LEN:
+            gemini_title = gemini_title.replace('**', '').strip()
+            print(f"翻译标题 [Gemini] 成功: {gemini_title}")
+            translated_title = gemini_title
+        else:
+            llama_title = _call_local_llm_simple(title, TITLE_SYSTEM_PROMPT, max_tokens=128)
+            if llama_title and contains_chinese(llama_title) and len(llama_title) <= MAX_TITLE_LEN:
+                llama_title = llama_title.replace('**', '').strip()
+                print(f"翻译标题本地 llama 兜底成功: {llama_title}")
+                translated_title = llama_title
+            else:
+                print(f"翻译标题 [Gemini] 完全失败（API + llama 均不可用），使用原始英文标题兜底: {title!r}")
+                translated_title = title
+    elif not api_url or not api_key:
         print("警告: AI api_url 或 api_key 未配置（api_config 或 环境变量），将使用原始标题作为翻译结果")
         translated_title = title
     else:

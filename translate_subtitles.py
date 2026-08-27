@@ -58,7 +58,10 @@ def load_api_config(config_file):
             config = json.load(f)
 
         # 验证必要的配置项
-        required_fields = ['url', 'model_name']
+        translator_type = config.get('type', 'openai')
+        required_fields = ['model_name']
+        if translator_type != 'gemini':
+            required_fields.append('url')
         for field in required_fields:
             if not config.get(field):
                 raise ValueError(f"配置文件中缺少必要字段: {field}")
@@ -315,6 +318,166 @@ def translate_with_local_llama(text, orig_ts_list=None):
     return None
 
 
+def translate_with_gemini_api(segment_index, text, api_config, orig_ts_list=None, max_retries=5):
+    """使用 Google Gemini API 翻译段落。
+
+    与 translate_text_worker 共享相同的兜底链：
+      1. Gemini API 正常 → 走 API
+      2. 内容无效 / 请求错误 → 重试（指数退避）
+      3. 重试仍失败 → 正则纠错 + 再试 1 次
+      4. 仍失败 → 本地 llama 兜底
+      5. 本地兜底也失败 → 返回最后一次可用文本（由 main() 逐行原文兜底）
+
+    返回 (idx, translated, original_seg, normalized_flag)。
+    """
+    api_key = api_config.get('api_key', '')
+    model_name = api_config.get('model_name', 'gemini-2.0-flash')
+    if not api_key:
+        print(f"[段落 {segment_index + 1}] [Gemini] 未配置 api_key，跳过 API 翻译")
+        return segment_index, None, text, False
+
+    try:
+        from google import genai
+    except ImportError as e:
+        print(f"[段落 {segment_index + 1}] [Gemini] 缺少依赖 google-genai（{e}），请运行: pip install google-genai")
+        return segment_index, None, text, False
+
+    client = genai.Client(api_key=api_key)
+
+    last_translated = None
+    last_normalized = None
+    last_format_err = None
+
+    def _build_contents(retry_count):
+        user_text = text
+        if retry_count >= 1 and last_format_err:
+            reminder = (
+                '\n\n【格式要求】上一轮输出存在问题，请重新输出：\n'
+                f'- 问题：{last_format_err}\n'
+                '- 时间戳必须与原文**完全相同**（逐字一致），禁止修改、编造、省略或调换顺序。\n'
+                '- 行数应与原文相同；若因断句合并，可以比原文少 1 行。\n'
+                '- 只输出翻译后的中文文本，不要添加解释、注释或任何额外内容。'
+            )
+            user_text = f"{text}{reminder}"
+        return {
+            "system": SYSTEM_PROMPT,
+            "user": user_text,
+        }
+
+    for retry_count in range(max_retries):
+        if retry_count > 0:
+            time.sleep(_compute_retry_delay(retry_count))
+        try:
+            messages = _build_contents(retry_count)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=messages["user"],
+                config={
+                    "system_instruction": messages["system"],
+                    "max_output_tokens": 4000,
+                    "temperature": 0.3,
+                    "top_p": 0.7,
+                },
+            )
+            translated_content = getattr(response, 'text', '') or ''
+            translated_content = filter_think_tags(translated_content)
+            last_translated = translated_content
+
+            if not translated_content:
+                print(f"[段落 {segment_index + 1}] [Gemini] 返回内容为空 (尝试次数: {retry_count + 1}/{max_retries})")
+                last_format_err = "返回内容为空"
+                continue
+
+            if not contains_chinese(translated_content):
+                print(f"[段落 {segment_index + 1}] [Gemini] 翻译内容未包含中文 (尝试次数: {retry_count + 1}/{max_retries})")
+                last_format_err = "译文未包含中文"
+                continue
+
+            ok, err, _ = is_valid_translation_format(translated_content, orig_ts_list=orig_ts_list)
+            if not ok:
+                print(f"[段落 {segment_index + 1}] [Gemini] 格式校验失败 (尝试次数: {retry_count + 1}/{max_retries}): {err}")
+                last_format_err = err
+                continue
+
+            with progress_lock:
+                completed_count += 1
+                print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} [Gemini] 成功 (尝试次数: {retry_count + 1})")
+                preview = translated_content[:200] + ("..." if len(translated_content) > 200 else "")
+                print(f"翻译内容预览: {preview}")
+                print()
+            return segment_index, translated_content, text, False
+
+        except Exception as e:
+            print(f"[段落 {segment_index + 1}] [Gemini] 请求错误 (尝试次数: {retry_count + 1}/{max_retries}): {e}")
+            last_format_err = f"Gemini 请求错误: {e}"
+            continue
+
+    # ---- 纠错阶段：正则纠错 + 再请求 1 次让模型自修 ----
+    if last_translated:
+        normalized = normalize_translation(last_translated)
+        if normalized != last_translated:
+            last_normalized = normalized
+            ok, err, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
+            if ok:
+                with progress_lock:
+                    completed_count += 1
+                print(f"[段落 {segment_index + 1}] [Gemini] 纠错后格式通过（无需再请求）")
+                return segment_index, normalized, text, True
+            print(f"[段落 {segment_index + 1}] [Gemini] 纠错后仍不通过: {err}，再请求 1 次让模型自修")
+
+        try:
+            time.sleep(1)
+            messages = _build_contents(max_retries)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=messages["user"],
+                config={
+                    "system_instruction": messages["system"],
+                    "max_output_tokens": 4000,
+                    "temperature": 0.3,
+                    "top_p": 0.7,
+                },
+            )
+            translated = getattr(response, 'text', '') or ''
+            translated = filter_think_tags(translated)
+            last_translated = translated
+
+            if translated and contains_chinese(translated):
+                ok, err, _ = is_valid_translation_format(translated, orig_ts_list=orig_ts_list)
+                if ok:
+                    with progress_lock:
+                        completed_count += 1
+                    print(f"[段落 {segment_index + 1}] [Gemini] 纠错阶段成功（模型自修）")
+                    return segment_index, translated, text, True
+                normalized = normalize_translation(translated)
+                ok2, _, _ = is_valid_translation_format(normalized, orig_ts_list=orig_ts_list)
+                if ok2:
+                    with progress_lock:
+                        completed_count += 1
+                    print(f"[段落 {segment_index + 1}] [Gemini] 纠错阶段成功（正则修复+模型自修）")
+                    return segment_index, normalized, text, True
+                last_normalized = normalized
+        except Exception as e:
+            print(f"[段落 {segment_index + 1}] [Gemini] 纠错阶段请求出错: {e}")
+
+    # ---- 本地 llama 兜底（与 OpenAI 路径共用）----
+    print(f"[段落 {segment_index + 1}] [Gemini] 转入本地 llama 兜底翻译")
+    llama_translated = translate_with_local_llama(text, orig_ts_list=orig_ts_list)
+    if llama_translated:
+        with progress_lock:
+            completed_count += 1
+        print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} [Gemini] 本地 llama 兜底成功")
+        return segment_index, llama_translated, text, True
+
+    # ---- 本地兜底也失败：返回最后一次可用文本，让 main() 逐行原文兜底 ----
+    with progress_lock:
+        completed_count += 1
+        print(f"[进度 {completed_count}/{total_count}] 段落 {segment_index + 1} [Gemini] 本地 llama 兜底失败，逐行原文兜底")
+    if last_normalized:
+        return segment_index, last_normalized, text, True
+    return segment_index, last_translated, text, True  # 可能为 None
+
+
 def translate_text_worker(segment_data, api_config, max_retries=5):
     """并行翻译工作函数。翻译流程：
       1. API 正常 → 走 API
@@ -333,6 +496,10 @@ def translate_text_worker(segment_data, api_config, max_retries=5):
     else:
         segment_index, text = segment_data
         orig_ts_list = _extract_orig_ts_list(text)
+
+    # Gemini API 分支
+    if api_config.get('type') == 'gemini':
+        return translate_with_gemini_api(segment_index, text, api_config, orig_ts_list=orig_ts_list, max_retries=max_retries)
 
     url = api_config['url']
     headers = {

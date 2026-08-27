@@ -21,6 +21,7 @@ on:
           - default
           - qwen36
           - hy_mt2
+          - gemini
           - custom1
           - custom2
       segment_size:
@@ -111,6 +112,7 @@ jobs:
           pip install https://github.com/yt-dlp/yt-dlp/archive/master.zip
           pip install requests edge-tts pydub numpy pillow bilibili-api-python aiohttp
           pip install huggingface_hub
+          pip install google-genai
           pip install llama-cpp-python --no-cache-dir --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
       - name: 缓存HuggingFace本地兜底模型
@@ -143,7 +145,8 @@ jobs:
           {
             "url": "${{ secrets[format('API_URL_{0}', env.API_NAME)] }}",
             "api_key": "${{ secrets[format('API_KEY_{0}', env.API_NAME)] }}",
-            "model_name": "${{ secrets[format('API_MODEL_{0}', env.API_NAME)] }}"
+            "model_name": "${{ secrets[format('API_MODEL_{0}', env.API_NAME)] }}",
+            "type": "${{ env.API_CONFIG_NAME == 'gemini' && 'gemini' || 'openai' }}"
           }
           EOF
           echo "api_config.json 内容："
