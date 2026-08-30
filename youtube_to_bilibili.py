@@ -236,11 +236,13 @@ def load_api_config(config_file: str) -> Dict[str, Any]:
         config = {}
 
     # 不强制要求所有字段；优先使用文件里的设置，缺失时由环境变量补充
-    final_config = {
+    final_config = dict(config)
+    final_config.update({
         'url': config.get('url') or os.environ.get('AI_API_URL') or os.environ.get('AI_URL') or '',
         'api_key': config.get('api_key') or os.environ.get('AI_API_KEY') or os.environ.get('AI_KEY') or '',
-        'model_name': config.get('model_name') or os.environ.get('AI_MODEL') or config.get('model') or ''
-    }
+        'model_name': config.get('model_name') or os.environ.get('AI_MODEL') or config.get('model') or '',
+        'type': config.get('type') or os.environ.get('AI_TYPE') or 'openai'
+    })
 
     return final_config
 
