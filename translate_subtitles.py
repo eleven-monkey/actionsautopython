@@ -37,6 +37,7 @@ SYSTEM_PROMPT = """# Role: 专业字幕翻译官
 4. 准确传达原意，译文符合中文表达习惯，通顺自然。
 5. 不要添加任何解释性文字、注释或说明。
 6. 保持原文的语气风格（如风趣幽默、严肃中立等）。
+7. 原文中的数学公式/LaTeX表达式（如 $\\Delta x$），请去除 `$` 和 `\\` 或转换为流畅自然的书面朗读形式（如 Delta x），方便后续语音合成（TTS）。
 """
 
 # 线程锁用于保护共享资源
@@ -891,6 +892,48 @@ def estimate_speaking_rates(lines, merged_flags=None):
     return out_lines
 
 
+def clean_math_for_tts(text: str) -> str:
+    """清理文本/字幕中的 LaTeX 数学公式和符号，防止 TTS (如 Edge-TTS) 将 $ 读作"美元"、将 \\ 读作"反斜杠"。"""
+    if not text:
+        return text
+
+    latex_symbol_map = {
+        r'\Delta': 'Delta ',
+        r'\delta': 'delta ',
+        r'\alpha': 'alpha ',
+        r'\beta': 'beta ',
+        r'\gamma': 'gamma ',
+        r'\theta': 'theta ',
+        r'\pi': 'pi ',
+        r'\sigma': 'sigma ',
+        r'\omega': 'omega ',
+        r'\lambda': 'lambda ',
+        r'\mu': 'mu ',
+        r'\epsilon': 'epsilon ',
+        r'\phi': 'phi ',
+        r'\psi': 'psi ',
+        r'\infty': '无穷大',
+        r'\approx': '约等于',
+        r'\neq': '不等于',
+        r'\le': '小于等于',
+        r'\ge': '大于等于',
+        r'\leq': '小于等于',
+        r'\geq': '大于等于',
+        r'\times': '乘以',
+        r'\cdot': '点',
+        r'\div': '除以',
+        r'\pm': '正负',
+        r'\sqrt': '根号',
+    }
+
+    for latex, replacement in latex_symbol_map.items():
+        text = re.sub(re.escape(latex) + r'(?=[^a-zA-Z]|$)', replacement, text)
+
+    text = text.replace('$', '').replace('\\', '')
+    text = re.sub(r' +', ' ', text)
+    return text.strip()
+
+
 def clean_translation_content(content):
     """清理翻译内容中的多余字符（只清理字符和行内空白，不合并换行）。
 
@@ -900,6 +943,9 @@ def clean_translation_content(content):
 
     # 额外清理一些可能影响TTS的字符
     content_cleaned = content_cleaned.replace('&lt;', '').replace('&amp;', '').replace('&quot;', '').replace('--', '—')
+
+    # 清理数学公式 LaTeX 符号与 $ \
+    content_cleaned = clean_math_for_tts(content_cleaned)
 
     # 清理行内多余空格（保留换行符）
     cleaned_lines = [' '.join(line.split()) for line in content_cleaned.splitlines()]
@@ -912,6 +958,7 @@ def clean_translation_line(line):
     """对单行做字符清洗 + 行内空白规整。"""
     line = line.replace('&gt;', '').replace('>>', '').replace('> ', '').replace('&nbsp;', '').replace('_', '').replace('＞', '').replace('[音乐]', '')
     line = line.replace('&lt;', '').replace('&amp;', '').replace('&quot;', '').replace('--', '—')
+    line = clean_math_for_tts(line)
     return ' '.join(line.split())
 
 

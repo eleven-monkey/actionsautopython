@@ -66,12 +66,57 @@ def run_text_to_speech(text, output_file, voice="zh-CN-XiaoxiaoNeural", max_retr
     finally:
         loop.close()
 
+def clean_math_for_tts(text: str) -> str:
+    """清理文本/字幕中的 LaTeX 数学公式和符号，防止 TTS (如 Edge-TTS) 将 $ 读作"美元"、将 \\ 读作"反斜杠"。"""
+    if not text:
+        return text
+
+    latex_symbol_map = {
+        r'\Delta': 'Delta ',
+        r'\delta': 'delta ',
+        r'\alpha': 'alpha ',
+        r'\beta': 'beta ',
+        r'\gamma': 'gamma ',
+        r'\theta': 'theta ',
+        r'\pi': 'pi ',
+        r'\sigma': 'sigma ',
+        r'\omega': 'omega ',
+        r'\lambda': 'lambda ',
+        r'\mu': 'mu ',
+        r'\epsilon': 'epsilon ',
+        r'\phi': 'phi ',
+        r'\psi': 'psi ',
+        r'\infty': '无穷大',
+        r'\approx': '约等于',
+        r'\neq': '不等于',
+        r'\le': '小于等于',
+        r'\ge': '大于等于',
+        r'\leq': '小于等于',
+        r'\geq': '大于等于',
+        r'\times': '乘以',
+        r'\cdot': '点',
+        r'\div': '除以',
+        r'\pm': '正负',
+        r'\sqrt': '根号',
+    }
+
+    for latex, replacement in latex_symbol_map.items():
+        text = re.sub(re.escape(latex) + r'(?=[^a-zA-Z]|$)', replacement, text)
+
+    text = text.replace('$', '').replace('\\', '')
+    text = re.sub(r' +', ' ', text)
+    return text.strip()
+
+
 def process_text_segment(task):
     """
     处理单个文本段落的函数，用于多进程处理
     """
     i, timestamp, content, temp_dir, voice = task
     try:
+        # 清理 LaTeX 数学公式符号，避免 TTS 读出 "美元"、"反斜杠"
+        content = clean_math_for_tts(content)
+
         # Use a cleaned version of timestamp for filename, removing potential special characters
         cleaned_timestamp = re.sub(r'[^\w\d]+', '_', timestamp)
         file_name = f"{cleaned_timestamp}.mp3"
