@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本地敏感文件（含 cookies / API key，绝不入库）
+youtube_cookies.txt
+api_config.json
+
+# 运行产物
+subtitles/
+output/
+
+# WorkBuddy 本地工作区状态（agent 记忆等，无需入库）
+.workbuddy-ai/

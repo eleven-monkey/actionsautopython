@@ -110,10 +110,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install https://github.com/yt-dlp/yt-dlp/archive/master.zip
+          # curl_cffi 是 yt-dlp 的 impersonation 依赖，必须装。
+          # 新版 YouTube extractor 会给每条字幕 URL 打上 impersonate=True，
+          # 缺少 curl_cffi 时无法模拟浏览器 TLS 指纹，字幕接口会直接返回 429。
+          pip install curl_cffi
           pip install requests edge-tts pydub numpy pillow bilibili-api-python aiohttp
           pip install huggingface_hub
           pip install google-genai
           pip install llama-cpp-python --no-cache-dir --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      - name: 校验 yt-dlp / curl_cffi
+        run: |
+          python -c "import curl_cffi, yt_dlp; print('curl_cffi', curl_cffi.__version__, '| yt_dlp', yt_dlp.version.__version__)"
+          echo "--- 可用的 impersonate targets ---"
+          python -m yt_dlp --list-impersonate-targets
 
       - name: 缓存HuggingFace本地兜底模型
         uses: actions/cache@v4
@@ -281,7 +291,8 @@ jobs:
           # 即使 --skip-prepare，youtube_to_bilibili.py 顶部也会强制 import
           # yt_dlp / PIL / bilibili_api，缺一个就 sys.exit(1)。
           # 因此这三个必须无条件安装。
-          pip install yt-dlp pillow requests bilibili-api-python aiohttp
+          # curl_cffi 与 prepare 阶段保持一致（impersonation 依赖）。
+          pip install yt-dlp curl_cffi pillow requests bilibili-api-python aiohttp
           if [ "${UPLOAD_DAILYMOTION}" == "true" ]; then
             pip install dailymotion
           fi

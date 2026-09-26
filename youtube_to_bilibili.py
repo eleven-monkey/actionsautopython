@@ -14,6 +14,7 @@ import os
 import sys
 import argparse
 import glob
+import shutil
 import subprocess
 import pickle
 import time
@@ -35,6 +36,79 @@ except ImportError as e:
     print(f"错误: 缺少必要的库: {e}")
     print("请运行: pip install yt-dlp pillow bilibili-api-python")
     sys.exit(1)
+
+
+# =====================================================================
+# yt-dlp 调用封装：可执行文件解析 + 瞬时错误（429/403/网络）重试
+#
+# 说明：新版 YouTube extractor 要求 impersonation（依赖 curl_cffi），
+# 且对机房 IP 的限流较严。这里统一加上指数退避重试，
+# 避免一次瞬时 429/403 就把整个 prepare 阶段打挂。
+# =====================================================================
+YTDLP_RETRY_ATTEMPTS = 3
+YTDLP_RETRY_BASE_DELAY = 15
+# 出现这些关键字时值得重试（限流 / 临时网络故障）
+YTDLP_RETRYABLE_KEYWORDS = (
+    '429', 'Too Many Requests', '403', 'Forbidden',
+    'timed out', 'timeout', 'Connection reset',
+    'Temporary failure', 'EOF occurred', 'Connection aborted',
+)
+
+
+def _ytdlp_prefix():
+    """返回调用 yt-dlp 的命令前缀。
+
+    优先用 PATH 上的 yt-dlp 可执行文件；找不到时回退到 `python -m yt_dlp`。
+    本文件顶部已经 import yt_dlp，因此模块一定可用，
+    回退路径避免 CI 里 PATH 没配好时报 WinError 2。
+    """
+    exe = shutil.which('yt-dlp')
+    return [exe] if exe else [sys.executable, '-m', 'yt_dlp']
+
+
+def _build_ytdlp_cmd(cookies_file: Optional[str], extra_args: list) -> list:
+    """组装 yt-dlp 命令：前缀 → cookies → 公共 extractor 参数 → 业务参数。
+
+    注意 cookies 必须插在「完整前缀」之后，不能写死 cmd[1:1]，
+    否则前缀为 [python, -m, yt_dlp] 时会被插到 python 和 -m 之间。
+    """
+    cmd = _ytdlp_prefix()
+    if cookies_file and os.path.exists(cookies_file):
+        cmd += ['--cookies', cookies_file]
+    cmd += [
+        '--extractor-args', 'youtube:player_client=default,-web_safari',
+        '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
+        '--remote-components', 'ejs:github',
+        '--no-playlist',
+    ]
+    cmd += extra_args
+    return cmd
+
+
+def _run_ytdlp(cmd: list, label: str) -> tuple:
+    """执行 yt-dlp 命令，对限流/瞬时网络错误做指数退避重试。
+
+    返回 (returncode, stdout, stderr)。非瞬时错误立即返回，不浪费时间重试。
+    """
+    rc, out, err = 1, '', 'yt-dlp 未执行'
+    for attempt in range(1, YTDLP_RETRY_ATTEMPTS + 1):
+        if attempt > 1:
+            delay = YTDLP_RETRY_BASE_DELAY * (2 ** (attempt - 2))
+            print(f"[重试] {label} 第 {attempt}/{YTDLP_RETRY_ATTEMPTS} 次，等待 {delay}s ...")
+            time.sleep(delay)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding='utf-8', errors='ignore')
+        except Exception as e:
+            print(f"{label}: 无法执行 yt-dlp ({e})")
+            return 1, '', str(e)
+        rc, out, err = r.returncode, (r.stdout or ''), (r.stderr or '')
+        if rc == 0:
+            return rc, out, err
+        print(f"{label} 失败 (第 {attempt}/{YTDLP_RETRY_ATTEMPTS} 次): {err.strip()[:400]}")
+        if not any(k in err for k in YTDLP_RETRYABLE_KEYWORDS):
+            return rc, out, err
+    return rc, out, err
 
 
 # =====================================================================
@@ -274,40 +348,27 @@ def download_youtube_video(url: str, output_path: str, cookies_file: str = None)
     for format_selector in format_selectors:
         print(f"尝试使用格式选择器: {format_selector}")
 
-        cmd = [
-            'yt-dlp',
-            '--extractor-args', 'youtube:player_client=default,-web_safari',
-            '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
-            '--remote-components', 'ejs:github',
-            '--no-playlist',
+        cmd = _build_ytdlp_cmd(cookies_file, [
             '-f', format_selector,
             '-o', output_path,
-            url
-        ]
+            url,
+        ])
 
         # 添加cookies支持
         if cookies_file and os.path.exists(cookies_file):
-            cmd.insert(1, '--cookies')
-            cmd.insert(2, cookies_file)
             print(f"使用cookies文件: {cookies_file}")
 
         print(f"正在从URL下载视频: {url}")
         print(f"执行命令: {' '.join(cmd)}")
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-            if result.returncode == 0:
-                print(f"视频已成功下载到 {output_path}")
-                return True
-            else:
-                print(f"使用格式 {format_selector} 下载失败: {result.stderr}")
-                if "Requested format is not available" in result.stderr:
-                    continue
-                else:
-                    return False
-        except Exception as e:
-            print(f"下载视频时发生意外错误: {e}")
-            return False
+        rc, _, err = _run_ytdlp(cmd, f"下载视频({format_selector})")
+        if rc == 0:
+            print(f"视频已成功下载到 {output_path}")
+            return True
+        print(f"使用格式 {format_selector} 下载失败: {err}")
+        if "Requested format is not available" in err:
+            continue
+        return False
 
     # 所有格式选择器都失败了
     print("所有格式选择器都失败了，无法下载视频")
@@ -343,36 +404,25 @@ def replace_audio_track(video_path: str, audio_path: str, output_path: str) -> b
 
 def download_thumbnail(url: str, output_path: str, cookies_file: str = None) -> bool:
     """下载YouTube视频的缩略图，使用 subprocess 调用 yt-dlp"""
-    cmd = [
-        'yt-dlp',
-        '--extractor-args', 'youtube:player_client=default,-web_safari',
-        '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
-        '--remote-components', 'ejs:github',
-        '--no-playlist',
+    cmd = _build_ytdlp_cmd(cookies_file, [
         '--skip-download',
         '--write-thumbnail',
         '-o', output_path,
-        url
-    ]
+        url,
+    ])
 
     # 添加cookies支持
     if cookies_file and os.path.exists(cookies_file):
-        cmd.insert(1, '--cookies')
-        cmd.insert(2, cookies_file)
+        print(f"使用cookies文件: {cookies_file}")
 
     print(f"正在下载URL的缩略图: {url}")
     print(f"执行命令: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        if result.returncode == 0:
-            print(f"缩略图已成功下载") # yt-dlp 会自动添加后缀，output_path 只是模板
-            return True
-        else:
-            print(f"缩略图下载错误: {result.stderr}")
-            return False
-    except Exception as e:
-        print(f"下载缩略图时发生意外错误: {e}")
-        return False
+    rc, _, err = _run_ytdlp(cmd, "下载缩略图")
+    if rc == 0:
+        print(f"缩略图已成功下载")  # yt-dlp 会自动添加后缀，output_path 只是模板
+        return True
+    print(f"缩略图下载错误: {err}")
+    return False
 
 
 def convert_and_compress_to_jpeg(input_path: str, output_path: str, target_size_kb: int = 50) -> bool:
@@ -557,38 +607,27 @@ def generate_upload_config(youtube_url: str, api_config_file: str, output_path: 
         print("警告: 未从文件或环境中加载到AI配置，AI翻译将会回退到原始标题。")
 
     # 获取YouTube视频标题
-    cmd = [
-        'yt-dlp',
-        '--extractor-args', 'youtube:player_client=default,-web_safari',
-        '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
-        '--remote-components', 'ejs:github',
-        '--no-playlist',
+    cmd = _build_ytdlp_cmd(cookies_file, [
         '--dump-json',
         '--skip-download',
-        youtube_url
-    ] # Note: first arg was renamed to url in this scope, wait, function arg is youtube_url
-
-    # Check function arguments: def generate_upload_config(youtube_url: str, ...
-    cmd[-1] = youtube_url
+        youtube_url,
+    ])
 
     # cookies支持
     if cookies_file and os.path.exists(cookies_file):
-        cmd.insert(1, '--cookies')
-        cmd.insert(2, cookies_file)
         print(f"获取标题时使用cookies文件: {cookies_file}")
 
+    print(f"获取标题命令: {' '.join(cmd)}")
+    rc, stdout, err = _run_ytdlp(cmd, "获取视频标题")
+    if rc != 0:
+        print(f"获取视频标题失败 (yt-dlp error): {err}")
+        return {}
     try:
-        print(f"获取标题命令: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        if result.returncode == 0:
-            info_dict = json.loads(result.stdout)
-            title = info_dict.get('title', None)
-            print(f"视频标题: {title}")
-        else:
-            print(f"获取视频标题失败 (yt-dlp error): {result.stderr}")
-            return {}
+        info_dict = json.loads(stdout)
+        title = info_dict.get('title', None)
+        print(f"视频标题: {title}")
     except Exception as e:
-        print(f"获取视频标题失败: {e}")
+        print(f"解析视频标题失败: {e}")
         return {}
 
     model = api_config.get('model_name') or os.environ.get('AI_MODEL') or "THUDM/GLM-4-9B-0414"

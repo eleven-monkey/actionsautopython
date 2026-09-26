@@ -3,6 +3,9 @@ import argparse
 import os
 import glob
 import re
+import shutil
+import sys
+import time
 import subprocess
 from yt_dlp import YoutubeDL
 
@@ -165,10 +168,53 @@ def vtt_to_sentences(vtt_text: str, debug: bool = False) -> str:
     return "\n".join(sentences)
 
 
-def download_subtitles(url, cookies_file=None):
-    """下载YouTube视频的字幕"""
-    cmd = [
-        'yt-dlp',
+# ========== 字幕语言候选与重试参数 ==========
+# 为什么必须优先用 "<lang>-orig"（原生 ASR 轨）而不是 "en"：
+#   1) yt-dlp 的 --sub-format 默认是 'best'，其实现为 `formats[-1]`，即取该语言
+#      列表里的【最后一条】。而 "en" 这个 key 会把原生 ASR 轨和大量机器翻译轨
+#      （tlang=en，lang=xx_XX，variant=timing-optimized）都收进来，最后一条常常
+#      正是翻译轨。YouTube 对「翻译字幕」接口限流极严，会直接返回 429。
+#   2) "en-orig" 只对应唯一的原生英文 ASR 轨（kind=asr, lang=en, 无 tlang），
+#      稳定可下载，并且带逐词时间戳 <HH:MM:SS.mmm>，正是本项目分句所需的格式。
+# 参考：https://github.com/yt-dlp/yt-dlp/issues/13831
+SUB_LANG_CANDIDATES = ('en-orig', 'en')
+
+# 429/网络抖动重试：每个候选语言最多尝试次数与首次退避秒数（指数退避）
+SUB_RETRY_ATTEMPTS = 3
+SUB_RETRY_BASE_DELAY = 15
+# ===========================================
+
+
+def _clean_vtt_dir():
+    """清掉 subtitles/ 下遗留的 .vtt，避免上一次尝试的文件被 glob 误取。"""
+    for f in glob.glob('subtitles/*.vtt'):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def _ytdlp_prefix():
+    """返回调用 yt-dlp 的命令前缀。
+
+    优先用 PATH 上的 yt-dlp 可执行文件；找不到时回退到 `python -m yt_dlp`。
+    本文件顶部已经 `from yt_dlp import YoutubeDL`，因此模块一定可用，
+    回退路径在任何环境下都能工作（也避免 CI 里 PATH 没配好导致 WinError 2）。
+    """
+    exe = shutil.which('yt-dlp')
+    if exe:
+        return [exe]
+    return [sys.executable, '-m', 'yt_dlp']
+
+
+def _build_subtitle_cmd(url, sub_lang, cookies_file=None):
+    """构造单次 yt-dlp 字幕下载命令。"""
+    # 注意：cookies 必须插在「完整前缀」之后，不能写死 cmd[1:1]，
+    # 否则前缀为 [python, -m, yt_dlp] 时会被插到 python 和 -m 之间。
+    cmd = _ytdlp_prefix()
+    if cookies_file and os.path.exists(cookies_file):
+        cmd += ['--cookies', cookies_file]
+    cmd += [
         '--extractor-args', 'youtube:player_client=default,-web_safari',
         # Explicitly point to the Deno path we set up
         '--extractor-args', 'youtube:js_runtime=/usr/local/bin/deno',
@@ -176,53 +222,109 @@ def download_subtitles(url, cookies_file=None):
         '--no-playlist',
         '--write-auto-sub',
         '--skip-download',
-        '--sub-langs', 'en',
+        '--sub-langs', sub_lang,
         '-o', 'subtitles/%(title)s.%(ext)s',
         url
     ]
-    
-    # 如果提供了cookies文件，添加到选项中
+    return cmd
+
+
+def _pick_vtt_file(sub_lang):
+    """从 subtitles/ 中挑出本次下载的 vtt，避免多文件时 glob[0] 取错。"""
+    files = glob.glob('subtitles/*.vtt')
+    if not files:
+        return None
+    exact = [f for f in files if f.endswith(f'.{sub_lang}.vtt')]
+    if exact:
+        return exact[0]
+    partial = [f for f in files if f'.{sub_lang}.' in os.path.basename(f)]
+    if partial:
+        return partial[0]
+    return files[0]
+
+
+def _finalize_vtt(original_vtt_file):
+    """把下载到的 vtt 统一改名为 subtitles/word_level.vtt 并解析成句子。
+
+    解析不出任何句子（例如拿到的是非逐词时间戳字幕）时返回 None，
+    以便外层继续尝试下一个候选语言。
+    """
+    new_vtt_file = 'subtitles/word_level.vtt'
+    if os.path.abspath(original_vtt_file) != os.path.abspath(new_vtt_file):
+        if os.path.exists(new_vtt_file):
+            os.remove(new_vtt_file)
+        os.rename(original_vtt_file, new_vtt_file)
+        print(f"重命名 '{original_vtt_file}' 为 '{new_vtt_file}'")
+    # 清掉同批次残留的其他 vtt，避免污染后续 glob
+    for f in glob.glob('subtitles/*.vtt'):
+        if os.path.abspath(f) != os.path.abspath(new_vtt_file):
+            os.remove(f)
+
+    processed_file = process_vtt_file(new_vtt_file)
+
+    with open(processed_file, 'r', encoding='utf-8') as f:
+        sentence_count = sum(1 for line in f if line.strip())
+    if sentence_count == 0:
+        print(f"警告: {new_vtt_file} 未解析出任何句子（可能不是逐词时间戳字幕），视为失败")
+        return None
+
+    return new_vtt_file
+
+
+def download_subtitles(url, cookies_file=None):
+    """下载YouTube视频的字幕。
+
+    按 SUB_LANG_CANDIDATES 顺序尝试候选语言，每个候选遇到 429/Too Many Requests
+    时做指数退避重试；全部失败则返回 None。
+    """
     if cookies_file and os.path.exists(cookies_file):
-        # We need to insert before other args to be safe, or just append. command line order usually matters for some flags but not file input.
-        # But for --cookies it's a global option usually.
-        cmd.insert(1, '--cookies')
-        cmd.insert(2, cookies_file)
         print(f"使用cookies文件: {cookies_file}")
     else:
         print("未提供cookies文件或文件不存在，尝试无cookies下载")
 
-    # 使用 yt-dlp subprocess 下载字幕
-    print(f"执行命令: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        if result.returncode != 0:
-             print(f"下载失败: {result.stderr}")
-             return None
-    except Exception as e:
-        print(f"下载失败: {e}")
-        return None
-    
-    # 重命名vtt文件
-    vtt_files = glob.glob('subtitles/*.vtt')
-    
-    if vtt_files:
-        # 获取第一个vtt文件
-        original_vtt_file = vtt_files[0]
-        
-        # 构建新的文件名
-        new_vtt_file = 'subtitles/word_level.vtt'
-        
-        # 重命名文件
-        os.rename(original_vtt_file, new_vtt_file)
-        print(f"重命名 '{original_vtt_file}' 为 '{new_vtt_file}'")
-        
-        # 处理VTT文件，提取单词级别字幕并拼接成句子
-        process_vtt_file(new_vtt_file)
-        
-        return new_vtt_file
-    else:
-        print("在 'subtitles' 文件夹中未找到 .vtt 文件。")
-        return None
+    for sub_lang in SUB_LANG_CANDIDATES:
+        cmd = _build_subtitle_cmd(url, sub_lang, cookies_file)
+
+        for attempt in range(1, SUB_RETRY_ATTEMPTS + 1):
+            if attempt > 1:
+                delay = SUB_RETRY_BASE_DELAY * (2 ** (attempt - 2))
+                print(f"[重试] 语言 {sub_lang!r} 第 {attempt}/{SUB_RETRY_ATTEMPTS} 次，等待 {delay}s ...")
+                time.sleep(delay)
+
+            _clean_vtt_dir()
+            print(f"执行命令: {' '.join(cmd)}")
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    encoding='utf-8', errors='ignore'
+                )
+            except Exception as e:
+                # 这类错误（找不到可执行文件等）重试也没用，直接换下一个候选语言
+                print(f"下载失败（无法执行 yt-dlp）: {e}")
+                break
+
+            if result.returncode == 0:
+                vtt_file = _pick_vtt_file(sub_lang)
+                if not vtt_file:
+                    print(f"命令成功但未找到 .vtt 文件（sub_lang={sub_lang!r}）")
+                    break
+                finalized = _finalize_vtt(vtt_file)
+                if finalized:
+                    print(f"使用候选语言 {sub_lang!r} 成功")
+                    return finalized
+                # 拿到了文件但解析不出句子，换下一个候选语言
+                break
+
+            err = (result.stderr or '').strip()
+            print(f"下载失败 (sub_lang={sub_lang!r}, 第 {attempt}/{SUB_RETRY_ATTEMPTS} 次): {err}")
+            # 只有限流类错误才值得重试；其他错误直接换下一个候选语言
+            if '429' not in err and 'Too Many Requests' not in err:
+                break
+
+        print(f"候选语言 {sub_lang!r} 未能获取可用字幕，尝试下一个候选")
+
+    print("所有候选语言均下载失败。")
+    return None
 
 def process_vtt_file(vtt_file):
     """处理VTT文件，提取单词级别字幕并拼接成带时间戳的句子"""
