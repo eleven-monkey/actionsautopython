@@ -95,6 +95,14 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 设置Python环境
+        uses: actions/setup-python@v5
+        with:
+          # 固定 3.12：Python 3.13+ 已移除标准库 audioop（pydub 依赖它），
+          # 且 llama-cpp-python 的 CPU 预编译 wheel 目前也只覆盖到 3.12，
+          # 不固定会跟随 ubuntu-latest 的默认版本自动升级而报错。
+          python-version: '3.12'
+
       - name: Install Deno
         run: |
           curl -fsSL https://deno.land/install.sh | sh
@@ -115,6 +123,8 @@ jobs:
           # 缺少 curl_cffi 时无法模拟浏览器 TLS 指纹，字幕接口会直接返回 429。
           pip install curl_cffi
           pip install requests edge-tts pydub numpy pillow bilibili-api-python aiohttp
+          # 兜底：若将来 Python 版本被改回 3.13+，补装 audioop 兼容包，避免 pydub 导入失败
+          pip install "audioop-lts; python_version >= '3.13'"
           pip install huggingface_hub
           pip install google-genai
           pip install llama-cpp-python --no-cache-dir --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
