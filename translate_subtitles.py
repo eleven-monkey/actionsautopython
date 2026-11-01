@@ -716,6 +716,90 @@ def remove_timestamps(text):
     return text_without_timestamps
 
 
+# ---- 音效/动作辅助标签清理 ----
+# YouTube 自动字幕里常见的 [music]、[snorts]、[applause] 等标签，
+# 翻译后若模型原样保留，会被 TTS 当成正文朗读，因此在最终译稿中统一剔除。
+_SOUND_TAG_KEYWORD = re.compile(
+    r'\b(?:'
+    r'music|musical|instrumental|melody|drumming|beats?|'
+    r'applause|applauding|cheering|cheers|clapping|claps|'
+    r'laughter|laughs|laughing|giggles?|giggling|chuckles?|chuckling|snicker(?:s|ing)?|'
+    r'snorts?|snorting|sighs?|sighing|gasps?|gasping|groans?|groaning|'
+    r'screams?|screaming|shouts?|shouting|yells?|yelling|whistles?|whistling|'
+    r'singing|humming|rapping|'
+    r'silence|silent|pause|noise|static|crickets|breathing|breath|breathes|exhales?|inhales?|'
+    r'coughs?|coughing|sneezes?|sneezing|smacking|rustling|thud|bang|knocks?|knocking|'
+    r'ringing|phone|alarm|footsteps|typing|clicks?|clicking|beeps?|beeping|bleeps?|bleeping|'
+    r'inaudible|indistinct|crosstalk|mumbles?|mumbling|whispers?|whispering|'
+    r'foreign language|'
+    r'speaks? (?:in )?(?:spanish|french|german|japanese|korean|chinese|english)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+# 中文辅助标签（模型有时会把英文标签译成中文）
+_CN_SOUND_TAG_KEYWORD = re.compile(
+    r'音乐|配乐|背景乐|掌声|笑声|欢呼|喝彩|叹气|咳嗽|喷嚏|沉默|静音|静默|杂音|噪音|'
+    r'外语|听不懂|脚步声|敲门|电话铃|呼吸声'
+)
+
+# 只匹配“内容为纯英文/数字/常见标点”的短括号片段，避免误删正文括号
+_BRACKET_TAG = re.compile(r'[\[\(（【]\s*([^\[\]\(\)（）【】]{1,80}?)\s*[\]\)）】]')
+_TAG_CONTENT_ALLOWED = re.compile(r"[A-Za-z0-9 ,.'’\-/&!?]+")
+
+
+def remove_sound_tags(text):
+    """移除字幕中的音效/动作辅助标签，如 [music]、[snorts]、(applause)。
+
+    只删除内容为英文辅助词（或常见中文辅助词）的括号片段；
+    正文括号（如 (see Figure 2)）与非辅助词括号原样保留。
+    """
+    if not text:
+        return text
+
+    # 音符符号本身也是提示，直接去掉
+    text = text.replace('♪', '').replace('♫', '')
+
+    def _replace(match):
+        inner = match.group(1).strip()
+        if not inner:
+            return ''
+        # [ ♪ ]、[ __ ] 这类纯符号/占位符
+        if not re.search(r'[^\s\W_]', inner):
+            return ''
+        if re.search(r'[\u4e00-\u9fff]', inner):
+            return '' if _CN_SOUND_TAG_KEYWORD.search(inner) else match.group(0)
+        if not _TAG_CONTENT_ALLOWED.fullmatch(inner):
+            return match.group(0)
+        return '' if _SOUND_TAG_KEYWORD.search(inner) else match.group(0)
+
+    return _BRACKET_TAG.sub(_replace, text)
+
+
+def _line_has_content(line):
+    """判断一行去掉时间戳后是否还有实际文字（字母/数字/汉字）。"""
+    return bool(re.search(r'[^\s\W_]', remove_timestamps(line)))
+
+
+def filter_sound_tags(lines, merged_flags=None):
+    """清除每一行的辅助标签，并丢弃清理后只剩时间戳/标点的行。
+
+    merged_flags 与 lines 等长时同步过滤，保证两者下标仍一一对应。
+    返回 (清理后的行列表, 同步后的标记列表或 None)。
+    """
+    out_lines = []
+    out_flags = [] if merged_flags is not None else None
+    for i, line in enumerate(lines):
+        cleaned = remove_sound_tags(line)
+        cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned).strip()
+        if not _line_has_content(cleaned):
+            continue
+        out_lines.append(cleaned)
+        if out_flags is not None:
+            out_flags.append(bool(merged_flags[i]))
+    return out_lines, out_flags
+
+
 def _ts_to_seconds(ts):
     """把时间戳字符串转成秒数。
 
@@ -1058,6 +1142,9 @@ def save_translation(translated_segments, output_path, keep_timestamps=False):
             # 如果不保留时间戳，则移除时间戳
             if not keep_timestamps:
                 cleaned_segment = remove_timestamps(cleaned_segment)
+            # 最终兜底：清除 [music]、[snorts] 等音效/动作辅助标签
+            seg_lines, _ = filter_sound_tags(cleaned_segment.splitlines())
+            cleaned_segment = "\n".join(seg_lines)
             if cleaned_segment:
                 file.write(cleaned_segment + "\n\n")
 
@@ -1142,6 +1229,11 @@ def main():
     translated_lines, merged_flags = merge_fast_speaking_lines(translated_lines)
     merged_line_count = original_line_count - len(translated_lines)
 
+    # 最终译稿筛一遍：去掉 [music]、[snorts] 等音效/动作辅助标签
+    lines_before_tag_filter = len(translated_lines)
+    translated_lines, merged_flags = filter_sound_tags(translated_lines, merged_flags)
+    removed_tag_lines = lines_before_tag_filter - len(translated_lines)
+
     # 保存翻译结果
     output_file = os.path.splitext(input_file)[0] + '_translated.txt'
     save_translation(translated_lines, output_file, keep_timestamps=args.keep_timestamps)
@@ -1153,6 +1245,8 @@ def main():
     print(f"兜底行数: {total_fallback_lines}")
     if merged_line_count > 0:
         print(f"语速合并: {original_line_count} 行 → {len(translated_lines)} 行（合并 {merged_line_count} 行）")
+    if removed_tag_lines > 0:
+        print(f"标签清理: 移除 {removed_tag_lines} 行纯音效/辅助标签")
     print(f"并行工作线程: {args.max_workers} 个")
     print(f"总耗时: {total_time:.2f} 秒")
     print(f"平均每段耗时: {total_time/len(segments):.2f} 秒")
